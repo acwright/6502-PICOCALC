@@ -70,10 +70,10 @@ Pico GPIO numbers.
 |---|---|---|
 | **TMS9918 video** | ST7365P / ILI9488-compatible LCD, 320×320, 16 bpp | SPI1: SCK=10, MOSI=11, MISO=12, CS=13, DC=14, RST=15 (25 MHz, up to 50) |
 | **Keyboard + joystick** | STM32 keyboard controller over I²C | I2C1: SDA=6, SCL=7; addr `0x1F`; read reg `0x09` |
-| **SID audio** | PWM speaker (stereo) | AUDIO_L=28, AUDIO_R=27, `GPIO_FUNC_PWM` |
+| **SID audio** | PWM speaker (stereo) | AUDIO_L=26, AUDIO_R=27, `GPIO_FUNC_PWM` (one PWM slice) |
 | **CompactFlash storage** | microSD card | SPI0: SCLK=18, MOSI=19, MISO=16, CS=17, DET=22 |
-| **6551 serial console** | USB-C CDC (and optional UART pins) | USB; UART0 on the side header if wired |
-| **DS1511Y RTC** | RP2040/RP2350 on-chip RTC/AON timer (battery via keyboard MCU for level) | internal |
+| **6551 serial console** | USB-C CDC **and** the side-header UART pins, both live at once | USB; UART0 TX=0, RX=1 (side header), at the ACIA's own baud/format |
+| **DS1511Y RTC** | RP2040/RP2350 on-chip RTC/AON timer (`pico_aon_timer` covers both); NVRAM in the top flash sector | internal |
 | Backlight / battery | Read/written through the I²C keyboard controller | I2C1 registers |
 | Status LED | Pico onboard LED | GP25 |
 
@@ -200,19 +200,42 @@ rest restore the remaining cards and polish.
 ### Phase 7 — CompactFlash storage (LOAD/SAVE/DIR)
 **Goal:** file storage for BASIC programs. **Resolves the CF open question.**
 - Port `StorageCard` (true-IDE/LBA register model) backed by a **CF disk image
-  file on the SD card** (`cf.img`, 256 × 1 MB banks), or a raw partition.
+  file on the SD card** (`CF.IMG`, up to 256 × 1 MB banks). The image is
+  created one bank long and grows a bank at a time as higher LBAs are written;
+  sectors past its end read back blank, so all 256 disks are addressable
+  without pre-filling 256 MB over SPI (which the Teensy does, and which would
+  take minutes here). An absent/unopenable image reads status `$00`, so the
+  BIOS `StInit` probe times out and leaves `HW_CF` clear.
 - BASIC `LOAD "x"`, `SAVE`, `DIR`, `DEL`, `DISK n`, `BLOAD`/`BSAVE` operate on it.
 - Optionally build/seed images with [`cffs`](https://github.com/acwright/cffs).
 - **Done when:** `SAVE"T"` then power-cycle then `LOAD"T"`/`RUN` round-trips.
 
 ### Phase 8 — RTC, VIA/joystick, real serial
 **Goal:** the remaining probed cards.
-- **RTC** (`RTCCard`) backed by the RP2040/RP2350 RTC; `TIME`/`DATE`/`SETTIME`,
-  NVRAM in flash. Answers the RTC open question: **yes, via on-chip clock.**
-- **VIA/joystick** — map keyboard keys (and/or USB gamepad if a host port is
-  available) to `JOY(1)`/`JOY(2)` through the joystick attachment.
-- **6551 serial** — expose the ACIA on the UART side-header pins in addition to
-  USB CDC, so XMODEM and terminal use work against real hardware.
+- **RTC** (`RTCCard`) backed by the on-chip always-on timer, which is the
+  *source of truth* rather than the cycle-counted copy the Teensy card keeps —
+  so `TIME`/`DATE` stay right whatever rate the tick loop happens to be running
+  at (nothing paces it to a real clock until Phase 11). `SETTIME`/`SETDATE`
+  commit through the DS1511Y's own transfer-enable freeze/thaw and set the
+  hardware clock. NVRAM is the last sector of the Pico's flash, written back a
+  couple of seconds after the machine stops writing to it (Core 1 is parked for
+  the erase, so the write is batched rather than done per store). Neither part's
+  clock is battery-backed on this board, so a cold boot starts from the firmware
+  build timestamp and a reset carries the running time across.
+  Answers the RTC open question: **yes, via on-chip clock.**
+- **VIA/joystick** — the arrows plus Space/Z/X/C drive `JOY(1)` on Port B,
+  through the port itself rather than a side channel: the keys set the port's
+  input bits, and `ReadJoystick1`'s "disable the encoders, read the raw port"
+  path (as a C64 reads a CIA) sees them. Port A carries `JOY(2)` the same way,
+  with nothing wired to it — this hardware has no second input device and no
+  USB host port for a gamepad, so it reads idle ($FF).
+- **6551 serial** — the ACIA also drives UART0 on the side header (GP0 TX,
+  GP1 RX), at whatever baud and framing the control register asks for (the BIOS
+  sets 19200 8-N-1), with the USB CDC link live in parallel. Debug `printf`
+  stays on USB only, so the UART carries nothing but the machine's own bytes and
+  XMODEM comes through clean. Transmit is queued and paced by the line rate,
+  with TDRE going low when the queue fills — the same flow control real hardware
+  gives, so no byte is ever dropped.
 - **Done when:** `TIME`/`DATE` work; `JOY()` reads the keys; a terminal on the
   UART pins talks to the ACIA.
 
@@ -257,8 +280,10 @@ rest restore the remaining cards and polish.
   card (Phase 7), so `LOAD`/`SAVE`/`DIR` and `BLOAD`/`BSAVE` all work. Cartridges
   load from SD via the launcher and map at `$C000` (Phase 10). XMODEM over serial
   remains as the terminal path (Phase 10).
-- **RTC:** Supported via the Pico's on-chip RTC/AON timer, with NVRAM in flash
-  (Phase 8).
+- **RTC:** Supported via the Pico's on-chip RTC/AON timer, with NVRAM in the top
+  sector of flash (Phase 8). The one thing the emulated part cannot have is a
+  battery: the clock keeps time across a reset but not across a power cycle, and
+  comes up at the firmware's build timestamp until `SETTIME`/`SETDATE`.
 
 ## 7. Primary risks
 

@@ -11,6 +11,11 @@ add_executable(6502-picocalc
     machine/gpio.c
     machine/video.c
     machine/video_render.c
+    machine/sound.c
+    machine/sound_synth.c
+    machine/storage.c
+    machine/rtc.c
+    machine/nvram.c
     rom/bios_rom.c
 )
 
@@ -44,6 +49,13 @@ target_link_libraries(6502-picocalc
     pico_multicore
     hardware_spi
     hardware_i2c
+    hardware_pwm
+    hardware_uart
+    # RTC card (machine/rtc.c): pico_aon_timer is the one clock API that
+    # works on both targets — the RP2040's RTC block and the RP2350's powman
+    # timer — and pico_flash carries its NVRAM (machine/nvram.c).
+    pico_aon_timer
+    pico_flash
 )
 
 pico_add_extra_outputs(6502-picocalc)

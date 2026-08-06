@@ -44,6 +44,11 @@ static bool cb2_enabled;
 static uint8_t kb_ascii;
 static bool kb_data_ready;
 
+// Held buttons, 1 = pressed (the ports invert on the way out). Stick 1 hangs
+// off Port B beside the keyboard encoder, stick 2 off Port A.
+static uint8_t joy1_buttons;
+static uint8_t joy2_buttons;
+
 static void update_irq(void) {
     if (ifr & ier & 0x7F) {
         ifr |= IRQ_IRQ;
@@ -66,11 +71,16 @@ static uint8_t combine_port(uint8_t ddr, uint8_t reg_out, uint8_t external) {
 }
 
 static uint8_t read_port_a(void) {
-    return combine_port(ddra, ora, 0xFF); // no PS/2 keyboard or joystick 2 wired
+    // No PS/2 encoder on this hardware, so the stick has the port to itself.
+    return combine_port(ddra, ora, (uint8_t) ~joy2_buttons);
 }
 
 static uint8_t read_port_b(void) {
-    uint8_t external = (cb2_enabled && kb_data_ready) ? kb_ascii : 0xFF;
+    // The keyboard encoder takes the port whenever it has a keystroke to
+    // hand over, and the stick shows through the rest of the time — the
+    // priority order the reference GPIOCard gives its attachments, and what
+    // lets ReadJoystick1 (which disables the encoder first) see the stick.
+    uint8_t external = (cb2_enabled && kb_data_ready) ? kb_ascii : (uint8_t) ~joy1_buttons;
     return combine_port(ddrb, orb, external);
 }
 
@@ -82,6 +92,8 @@ void gpio_reset(void) {
     cb2_enabled = false;
     kb_ascii = 0;
     kb_data_ready = false;
+    joy1_buttons = 0;
+    joy2_buttons = 0;
 }
 
 uint8_t gpio_read(uint16_t addr) {
@@ -244,4 +256,12 @@ uint8_t gpio_tick(void) {
 void gpio_key_press(uint8_t ascii) {
     kb_ascii = ascii;
     kb_data_ready = true;
+}
+
+void gpio_joystick1_set(uint8_t buttons) {
+    joy1_buttons = buttons;
+}
+
+void gpio_joystick2_set(uint8_t buttons) {
+    joy2_buttons = buttons;
 }

@@ -24,6 +24,14 @@
 // swallowed and could never interrupt a RUNning loop.
 #define KBD_KEY_ESC_RAW 0xB1
 
+// Arrow-key codes from the controller's own key set (clockworkpi/PicoCalc
+// Code/picocalc_keyboard/keyboard.h KEY_LEFT..KEY_RIGHT). They pass through
+// kbd_decode() unchanged, and also drive the emulated joystick below.
+#define KBD_KEY_LEFT_RAW  0xB4
+#define KBD_KEY_UP_RAW    0xB5
+#define KBD_KEY_DOWN_RAW  0xB6
+#define KBD_KEY_RIGHT_RAW 0xB7
+
 // Brings up I2C1 at the controller's fixed 10kHz bus speed. Must be called
 // once before any other kbd_* call.
 void kbd_init(void);
@@ -44,6 +52,15 @@ int kbd_poll_raw(uint8_t *state, uint8_t *code);
 // Applies the same press/Ctrl-modifier decode as kbd_poll() to an
 // already-read (state, code) pair.
 int kbd_decode(uint8_t state, uint8_t code);
+
+// The emulated joystick's currently-held buttons, as a mask of the VIA
+// card's GPIO_JOY_* bits (machine/gpio.h), ready to hand to
+// gpio_joystick1_set(). Maintained by kbd_decode() from the press and
+// release events of the keys listed in kbd.c's joystick_map -- the arrows
+// and four button keys. Those keys keep typing their normal characters as
+// well; the PicoCalc has no separate stick, so its keyboard is the stick
+// (PLAN.md Phase 8).
+uint8_t kbd_joystick_state(void);
 
 // Reads the battery register (0x0b). Returns a controller-defined raw
 // value (see hardware notes), or -1 on I2C error.

@@ -1,10 +1,17 @@
 #include "kbd.h"
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #include "hardware/gpio.h"
 #include "hardware/i2c.h"
 #include "pico/time.h"
+
+// For the joystick bit layout. This driver already speaks the emulated
+// machine's language rather than the controller's — it remaps Enter and Esc
+// to the codes the BIOS expects — and the stick is fed from the same key
+// events, so it reports its state in the VIA card's bits directly.
+#include "machine/gpio.h"
 
 #define KBD_I2C     i2c1
 #define KBD_PIN_SDA 6
@@ -17,9 +24,29 @@
 #define KBD_REG_BATTERY   0x0B
 
 #define KBD_STATE_PRESS   1
+#define KBD_STATE_HOLD    2
 #define KBD_STATE_RELEASE 3
 
+// Which keys stand in for the joystick's eight switches. The four arrows are
+// the obvious directions; Space is fire, with Z/X/C alongside it for the
+// three remaining buttons, all within reach of the left hand while the right
+// works the arrows.
+static const struct {
+    uint8_t code;
+    uint8_t button;
+} joystick_map[] = {
+    { KBD_KEY_UP_RAW,    GPIO_JOY_UP },
+    { KBD_KEY_DOWN_RAW,  GPIO_JOY_DOWN },
+    { KBD_KEY_LEFT_RAW,  GPIO_JOY_LEFT },
+    { KBD_KEY_RIGHT_RAW, GPIO_JOY_RIGHT },
+    { ' ',               GPIO_JOY_A },
+    { 'z',               GPIO_JOY_B },
+    { 'x',               GPIO_JOY_X },
+    { 'c',               GPIO_JOY_Y },
+};
+
 static bool s_ctrl_held = false;
+static uint8_t s_joystick = 0;
 
 void kbd_init(void) {
     i2c_init(KBD_I2C, KBD_HZ);
@@ -50,8 +77,27 @@ int kbd_poll_raw(uint8_t *state, uint8_t *code) {
     return kbd_read_reg16(KBD_REG_FIFO, state, code);
 }
 
+// Follows the press/hold/release events of the joystick keys. Shift or Caps
+// sends the letter keys up as capitals, which is still the same switch.
+static void track_joystick(uint8_t state, uint8_t code) {
+    uint8_t key = (code >= 'A' && code <= 'Z') ? (uint8_t) (code + ('a' - 'A')) : code;
+
+    for (size_t i = 0; i < sizeof(joystick_map) / sizeof(joystick_map[0]); i++) {
+        if (joystick_map[i].code != key) continue;
+        if (state == KBD_STATE_RELEASE) s_joystick &= (uint8_t) ~joystick_map[i].button;
+        else s_joystick |= joystick_map[i].button;
+        return;
+    }
+}
+
+uint8_t kbd_joystick_state(void) {
+    return s_joystick;
+}
+
 int kbd_decode(uint8_t state, uint8_t code) {
     if (state == 0 && code == 0) return -1; // nothing pending
+
+    track_joystick(state, code);
 
     if (code == KBD_KEY_CTRL) {
         if (state == KBD_STATE_PRESS) s_ctrl_held = true;

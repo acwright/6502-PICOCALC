@@ -16,11 +16,23 @@
 // fed into the GPIO/VIA card's emulated matrix keyboard encoder (slot 5,
 // src/machine/gpio.c) so the BIOS's own IRQ-driven keyboard path is
 // exercised, fully interactive with no host needed (see PLAN.md Phase 5).
+// Phase 6: the SID (slot 6, src/machine/sound.c) is wired up and synthesised
+// on Core 1 alongside the renderer, out to the PWM speaker pins (see
+// src/machine/sound_synth.c and PLAN.md Phase 6).
+// Phase 7: the CompactFlash card (slot 3, src/machine/storage.c) is backed by
+// a disk image on the SD card, so BASIC's LOAD/SAVE/DIR and the Monitor's
+// storage commands work and persist across power cycles (PLAN.md Phase 7).
+// Phase 8: the last three probed cards. The DS1511Y RTC (slot 2,
+// src/machine/rtc.c) runs off the Pico's always-on timer with its NVRAM in
+// flash, the VIA's joysticks (slot 5) are driven from the PicoCalc's own
+// keys, and the 6551 (slot 4) now also reaches the side-header UART pins
+// (PLAN.md Phase 8).
 
 #include <stdio.h>
 #include <string.h>
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
+#include "pico/flash.h"
 
 #include "lcd/lcd.h"
 #include "kbd/kbd.h"
@@ -29,6 +41,9 @@
 #include "machine/machine.h"
 #include "machine/video_render.h"
 #include "machine/gpio.h"
+#include "machine/sound_synth.h"
+#include "machine/storage.h"
+#include "machine/nvram.h"
 
 #ifndef PICO_DEFAULT_LED_PIN
 #define PICO_DEFAULT_LED_PIN 25
@@ -45,9 +60,12 @@ static void present_corner(int x, int y, uint8_t color) {
     lcd_present();
 }
 
-// Mounts the SD card, lists the root directory, and dumps the first regular
-// file found (capped) over USB serial — the Phase 2 "done when" SD check.
-static void sd_test(void) {
+// Brings up the SD card, mounts it, and lists the root directory over USB
+// serial — the Phase 2 "done when" SD check. The mount stays live for the
+// rest of the run: the emulated CF card (Phase 7, src/machine/storage.c) is
+// backed by a file on this volume. Phase 2's dump of the first file found is
+// gone, since that file is now usually the multi-megabyte CF image.
+static void sd_mount(void) {
     sd_bus_init();
     printf("SD: card-detect pin reads %s (polarity unverified on hardware)\n",
            sd_card_detect() ? "present" : "absent");
@@ -68,43 +86,28 @@ static void sd_test(void) {
         return;
     }
 
-    char first_file[13] = {0};
     for (;;) {
         fr = f_readdir(&dir, &fno);
         if (fr != FR_OK || fno.fname[0] == 0) break;
         printf("SD:  %c %8lu  %s\n", (fno.fattrib & AM_DIR) ? 'd' : '-',
                (unsigned long) fno.fsize, fno.fname);
-        if (!(fno.fattrib & AM_DIR) && first_file[0] == 0) {
-            strncpy(first_file, fno.fname, sizeof(first_file) - 1);
-        }
     }
     f_closedir(&dir);
+}
 
-    if (first_file[0] == 0) {
-        printf("SD: no regular file found to dump\n");
-        return;
-    }
+// Everything Core 1 owns: the SID's 44.1kHz sample interrupt (which has to
+// be enabled on this core, not Core 0's real-time 6502) and then the VDP
+// renderer's own never-returning frame loop.
+static void core1_entry(void) {
+    // Writing the RTC's NVRAM back to flash (src/machine/nvram.c) means
+    // erasing a sector, which cannot happen while this core is fetching
+    // instructions from flash. This opts Core 1 in to being parked for the
+    // duration; without it, flash_safe_execute() refuses to run at all and
+    // NVRAM would stop persisting.
+    flash_safe_execute_core_init();
 
-    FIL fil;
-    fr = f_open(&fil, first_file, FA_READ);
-    if (fr != FR_OK) {
-        printf("SD: open '%s' failed (FRESULT=%d)\n", first_file, fr);
-        return;
-    }
-
-    printf("SD: dumping '%s':\n", first_file);
-    char buf[128];
-    UINT br;
-    uint32_t total = 0;
-    const uint32_t cap = 4096;
-    do {
-        fr = f_read(&fil, buf, sizeof(buf), &br);
-        for (UINT i = 0; i < br && total < cap; i++, total++) putchar(buf[i]);
-    } while (fr == FR_OK && br > 0 && total < cap);
-    printf("\nSD: dumped %lu bytes%s\n", (unsigned long) total,
-           total >= cap ? " (truncated)" : "");
-
-    f_close(&fil);
+    sound_synth_init();
+    video_render_core1_entry();
 }
 
 int main(void) {
@@ -138,12 +141,17 @@ int main(void) {
            PICOCALC_BOARD, (long long) us, (unsigned long) fps);
 
     kbd_init();
-    sd_test();
+    sd_mount();
+    // Must come after the mount above: the emulated CF card is a disk image
+    // on the SD volume (PLAN.md Phase 7).
+    storage_init();
 
     // Core 1 renders the VDP (video.c's slot-7 register/VRAM model, fed by
-    // the CPU running on Core 0 below) to the LCD continuously — see
-    // src/machine/video_render.c and PLAN.md Phase 4.
-    multicore_launch_core1(video_render_core1_entry);
+    // the CPU running on Core 0 below) to the LCD continuously, and its
+    // sample interrupt synthesises the SID (slot 6) to the speaker — see
+    // src/machine/video_render.c, src/machine/sound_synth.c, and PLAN.md
+    // Phases 4 and 6.
+    multicore_launch_core1(core1_entry);
 
     machine_init();
     machine_reset();
@@ -164,8 +172,18 @@ int main(void) {
         if (absolute_time_diff_us(last_kbd_poll, get_absolute_time()) >= 16000) {
             int key = kbd_poll();
             if (key >= 0) gpio_key_press((uint8_t) key);
+            // The same poll tracks the keys standing in for a joystick, so
+            // JOY(1) reads whichever of them are held down right now
+            // (PLAN.md Phase 8).
+            gpio_joystick1_set(kbd_joystick_state());
             last_kbd_poll = get_absolute_time();
         }
+
+        // Writes the RTC's NVRAM back to flash once the machine has stopped
+        // poking at it. Parks Core 1 for tens of milliseconds when it fires,
+        // so it is kept out here in the outer loop rather than done from the
+        // card's store handler.
+        nvram_task();
 
         if (absolute_time_diff_us(last_blink, get_absolute_time()) >= 500000) {
             heartbeat++;
