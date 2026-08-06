@@ -2,15 +2,46 @@
 
 ![The AC6502 running on a ClockworkPi PicoCalc](images/PicoCalc.png)
 
-The **A.C. Wright AC6502** — a 65C02 machine with a TMS9918 VDP, a SID, a 6522
-VIA, a 6551 ACIA, a DS1511Y clock and a CompactFlash card — running on a
+The **[A.C. Wright AC6502](https://github.com/acwright/6502-ACE)** — a 65C02
+machine with a TMS9918 VDP, a SID, a 6522 VIA, a 6551 ACIA, a DS1511Y clock and
+a CompactFlash card — running on a
 [ClockworkPi PicoCalc](https://www.clockworkpi.com/picocalc), as a complete
-replacement for the device firmware. One `.uf2`, no host needed: it boots the
-real 32 KB BIOS ROM byte-for-byte, probes its I/O slots, shows the splash, and
-drops into BASIC.
+replacement for the device firmware.
 
-See [PLAN.md](PLAN.md) for the full design — how each card is emulated, what
-was ported from where, and the trade-offs behind the resource budget.
+One `.uf2`, no host needed: it boots the real 32 KB BIOS ROM byte-for-byte,
+probes its I/O slots, shows the splash, and drops into BASIC.
+
+> 📖 **Guide:** [AC6502 Documentation](https://acwright.github.io/6502-DOCS/) —
+> the user's and programmer's guide for the whole family. Everything the machine
+> itself does — BASIC, the Monitor, the BIOS calls, the I/O cards — is documented
+> there; this README covers only what is particular to the PicoCalc port.
+
+---
+
+## Hardware Emulation
+
+The same machine the desktop emulator runs, on two RP2040/RP2350 cores: Core 0
+is the 6502 and its I/O cards, Core 1 rasterises the VDP to the LCD and
+synthesises the SID.
+
+| Component | Details |
+|---|---|
+| **CPU** | W65C02S via [vrEmu6502](https://github.com/visrealm/vrEmu6502), full opcode set, IRQ / NMI |
+| **RAM** | 32 KB system RAM + banked expansion (see [Pico 1 vs Pico 2](#pico-1-vs-pico-2)) |
+| **ROM** | 32 KB BIOS in flash, replaceable from the SD card |
+| **Video** | TMS9918A VDP, 16 KB VRAM — rendered to the PicoCalc's 320×320 LCD |
+| **Audio** | MOS 6581 SID — synthesised to the PWM speaker pins |
+| **Serial** | 6551 ACIA — bridged to USB CDC *and* the side-header UART, both live at once |
+| **Storage** | CompactFlash 8-bit IDE — `CF.IMG` on the SD card, 256 × 1 MB banks |
+| **RTC / NVRAM** | DS1511Y+ — clock plus 256 B of NVRAM, kept in flash |
+| **GPIO** | 6522 VIA — keyboard on port B, fed from the PicoCalc's I2C keyboard, plus a joystick on each port |
+
+Two places knowingly differ from the reference: the VDP status register's
+fifth-sprite and collision bits always read 0 (sprites are rasterised on the
+other core), and the emulated CPU is not paced to a fixed clock rate — it runs
+as fast as the board manages. Nothing in the BIOS or BASIC depends on either.
+
+---
 
 ## Requirements
 
@@ -55,6 +86,8 @@ board, open a serial terminal: the banner names it.
 6502-PICOCALC (board=pico, clk_sys=200000 kHz)
 ```
 
+---
+
 ## SD card
 
 The launcher expects three folders, and offers to create any that are missing:
@@ -91,6 +124,8 @@ boot: kbd_wait_ready           t+4492ms
 If the controller never answers, it gives up after 5 seconds and carries on, so
 a bare Pico with no PicoCalc attached still boots.
 
+---
+
 ## Controls
 
 **F1** opens the launcher at any time — even if a cartridge has hung the
@@ -125,6 +160,8 @@ Stored in flash and applied on every boot:
 Sleep is a backlight blank, not a suspend — the 6502 carries on, audio keeps
 playing, and the serial console stays live.
 
+---
+
 ## Pico 1 vs Pico 2
 
 Both are supported and boot the same machine. The differences come from SRAM:
@@ -146,14 +183,44 @@ the emulated CPU's throughput. Expect a boot-to-BASIC of around 30 seconds on a
 Pico 1 rather than the second or two the real hardware takes. It is slow, but
 it is stable, and everything else works as it should.
 
+---
+
+## Project Structure
+
+```
+src/
+  cpu/vrEmu6502/  Troy Schrapel's 6502 core, vendored
+  machine/        The machine: bus, cards (video, sound, serial, via, rtc,
+                  storage, ram_bank), media, settings, and the Core 1
+                  video rasteriser and SID synthesiser
+  rom/            The BIOS image, embedded in flash
+  lcd/  kbd/  sd/ PicoCalc hardware drivers (SPI panel, I2C keyboard, SD)
+  fatfs/          FatFs, for the SD card
+  launcher/       The F1 launcher — file browser, slots, settings
+  main.c          Boot, the Core 0 run loop, and the USB CDC console
+```
+
+---
+
+## Related
+
+- [6502-ACE](https://github.com/acwright/6502-ACE) — the real machine, and the index of the whole family
+- [6502-DOCS](https://github.com/acwright/6502-DOCS) — the user's and programmer's guide ([read it here](https://acwright.github.io/6502-DOCS/))
+- [6502-BIOS](https://github.com/acwright/6502-BIOS) — firmware source; the ROM embedded here is built from it
+- [6502-EMULATOR](https://github.com/acwright/6502-EMULATOR) — the desktop and web emulator, and the reference this port's I/O cards match
+- [6502-DEV](https://github.com/acwright/6502-DEV) — the Teensy development firmware this port's structure came from
+- [6502-PRG](https://github.com/acwright/6502-PRG) / [6502-CRT](https://github.com/acwright/6502-CRT) — templates for the programs and cartridges the launcher loads
+- [6502-ASM](https://github.com/acwright/6502-ASM) / [6502-BAS](https://github.com/acwright/6502-BAS) — example programs and BASIC listings to run
+- [cffs](https://github.com/acwright/cffs) — builds the `CF.IMG` CompactFlash images
+- [bastok](https://github.com/acwright/bastok) — tokenizes BASIC listings into the `.prg` images the launcher accepts
+
 ## Credits
 
-This port stands on four other projects, all A.C. Wright's unless noted:
+- 6502 core: [vrEmu6502](https://github.com/visrealm/vrEmu6502) by Troy Schrapel (MIT)
+- LCD, keyboard and SD reference code: [clockworkpi/PicoCalc](https://github.com/clockworkpi/PicoCalc)
+- SD card filesystem: [FatFs](http://elm-chan.org/fsw/ff/) by ChaN
 
-| | |
-|---|---|
-| [6502-BIOS](https://github.com/acwright/6502-BIOS) | The 32 KB ROM this runs, embedded unchanged. |
-| [6502-EMULATOR](https://github.com/acwright/6502-EMULATOR) | The reference semantics for every I/O card. |
-| [6502-DEV](https://github.com/acwright/6502-DEV) | The Teensy firmware this port's structure came from. |
-| [vrEmu6502](https://github.com/visrealm/vrEmu6502) | Troy Schrapel's 6502 core (MIT). |
-| [clockworkpi/PicoCalc](https://github.com/clockworkpi/PicoCalc) | LCD, keyboard and SD reference code for the hardware. |
+## Contributing
+
+This port pairs with the hardware, firmware and emulator linked above.
+Contributions, issues, and feature requests are welcome!
