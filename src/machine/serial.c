@@ -4,6 +4,7 @@
 
 #include "hardware/gpio.h"
 #include "hardware/uart.h"
+#include "pico.h"
 #include "pico/stdio.h"
 
 // R65C51 (6551 ACIA) register bits — see BIOS.inc for the authoritative
@@ -15,10 +16,17 @@
 #define SC_CMD_PME      0x20 // parity mode enable
 #define SC_CMD_PMC      0xC0 // parity mode control
 
+#define SC_STATUS_PE    0x01 // parity error
+#define SC_STATUS_FE    0x02 // framing error
 #define SC_STATUS_OVR   0x04
 #define SC_STATUS_RDRF  0x08 // receive data register full
 #define SC_STATUS_TDRE  0x10 // transmit data register empty
+#define SC_STATUS_DCD   0x20 // data carrier detect, active low: 0 = carrier
+#define SC_STATUS_DSR   0x40 // data set ready, active low: 0 = ready
 #define SC_STATUS_IRQ   0x80
+
+// The three receive error flags, which a status read clears (R6551 datasheet).
+#define SC_STATUS_ERRORS (SC_STATUS_PE | SC_STATUS_FE | SC_STATUS_OVR)
 
 // Control register: baud rate in bits 0-3, receiver clock source in bit 4,
 // word length in bits 5-6, stop bits in bit 7.
@@ -69,8 +77,11 @@ static bool queue_full(void) {
 }
 
 // Pushes each queued byte into the UART's own FIFO as it makes room, which
-// is what paces the line.
-static void drain_tx_queue(void) {
+// is what paces the line. RAM-resident along with serial_tick() below:
+// called from machine_run() on every emulated cycle (PLAN.md Phase 11 perf
+// pass — see machine.c's bus_read()/bus_write() for the measurement and full
+// reasoning).
+static void __not_in_flash_func(drain_tx_queue)(void) {
     while (tx_head != tx_tail && uart_is_writable(SERIAL_UART)) {
         uart_get_hw(SERIAL_UART)->dr = tx_queue[tx_tail];
         tx_tail = queue_next(tx_tail);
@@ -135,11 +146,16 @@ uint8_t serial_read(uint16_t addr) {
     uint8_t s;
     switch (addr & 0x03) {
         case 0: // receive data register
-            status &= ~(SC_STATUS_IRQ | SC_STATUS_RDRF);
+            status &= (uint8_t) ~(SC_STATUS_IRQ | SC_STATUS_RDRF | SC_STATUS_OVR);
             return rx;
         case 1: // status register
-            s = status;
-            status &= ~SC_STATUS_IRQ;
+            // Modem lines are wired to a permanently connected, permanently
+            // ready peer — there is no modem on the other end of either the
+            // USB console or the side header.
+            s = (uint8_t) ((status & ~SC_STATUS_DCD) | SC_STATUS_DSR);
+            // Reading clears the interrupt flag and the three receive error
+            // flags; the byte returned above is the state before the clear.
+            status &= (uint8_t) ~(SC_STATUS_IRQ | SC_STATUS_ERRORS);
             return s;
         case 2:
             return cmd;
@@ -166,8 +182,13 @@ void serial_write(uint16_t addr, uint8_t value) {
             tx_pending = true;
             break;
         case 1: // programmed reset (value ignored)
+            // Clears the low five command bits and leaves the parity mode
+            // above them alone, per the datasheet, and drops any pending
+            // interrupt and receive error.
             cmd &= 0xE0;
-            status &= ~SC_STATUS_OVR;
+            status &= (uint8_t) ~(SC_STATUS_IRQ | SC_STATUS_ERRORS);
+            status |= SC_STATUS_TDRE;
+            tx_pending = false;
             apply_line_settings();
             break;
         case 2:
@@ -181,20 +202,33 @@ void serial_write(uint16_t addr, uint8_t value) {
     }
 }
 
-uint8_t serial_tick(void) {
+uint8_t __not_in_flash_func(serial_tick)(void) {
     // Rate-limit RX polling so a byte-at-a-time USB CDC read isn't attempted
     // every single CPU tick (see 6502-DEV SerialCard::tick, PLAN.md Phase 3).
+    //
+    // Nothing is pulled off either link while the receive register is still
+    // full: the byte stays where it is — in the UART's FIFO, or in the USB
+    // stack's buffer, where the host will be flow-controlled if it backs up —
+    // rather than being read here and dropped. That matters for XMODEM
+    // (PLAN.md Phase 10), where a host sends a 132-byte packet as one burst
+    // and every byte of it has to arrive; a real 6551 is fed by a wire that
+    // paces itself, and this is the closest equivalent. An overrun is
+    // reported from the UART's own OE flag, which is where it can genuinely
+    // still happen.
     if (++rx_poll_counter >= 64) {
         rx_poll_counter = 0;
 
-        // The side-header UART is checked first; anything it hasn't sent,
-        // the USB console might have (PLAN.md Phase 8).
-        int c = uart_is_readable(SERIAL_UART) ? (int) uart_getc(SERIAL_UART)
-                                              : getchar_timeout_us(0);
-        if (c != PICO_ERROR_TIMEOUT) {
-            if (status & SC_STATUS_RDRF) {
-                status |= SC_STATUS_OVR; // previous byte not yet read
-            } else {
+        if (uart_get_hw(SERIAL_UART)->rsr & UART_UARTRSR_OE_BITS) {
+            uart_get_hw(SERIAL_UART)->rsr = 0; // write clears it
+            status |= SC_STATUS_OVR;
+        }
+
+        if (!(status & SC_STATUS_RDRF)) {
+            // The side-header UART is checked first; anything it hasn't sent,
+            // the USB console might have (PLAN.md Phase 8).
+            int c = uart_is_readable(SERIAL_UART) ? (int) uart_getc(SERIAL_UART)
+                                                  : getchar_timeout_us(0);
+            if (c != PICO_ERROR_TIMEOUT) {
                 rx = (uint8_t) c;
                 status |= SC_STATUS_RDRF;
                 if (cmd & SC_CMD_REM) {

@@ -2,6 +2,7 @@ add_executable(6502-picocalc
     main.c
     lcd/lcd.c
     kbd/kbd.c
+    launcher/launcher.c
     sd/sd.c
     fatfs/ff.c
     fatfs/diskio.c
@@ -16,6 +17,9 @@ add_executable(6502-picocalc
     machine/storage.c
     machine/rtc.c
     machine/nvram.c
+    machine/settings.c
+    machine/ram_bank.c
+    machine/media.c
     rom/bios_rom.c
 )
 
@@ -32,10 +36,14 @@ pico_enable_stdio_uart(6502-picocalc 0)
 target_compile_definitions(6502-picocalc PRIVATE
     PICOCALC_BOARD="${PICO_BOARD}"
     # USB CDC has no history buffer: without this, boot-time printf output is
-    # lost whenever the host terminal is opened after power-on/reset, which
-    # is the common case. Blocks stdio_init_all() up to 5s for the host to
-    # be USB-configured (see PICO_STDIO_USB_CONNECTION_WITHOUT_DTR below).
-    PICO_STDIO_USB_CONNECT_WAIT_TIMEOUT_MS=5000
+    # lost whenever the host terminal is opened after power-on/reset. Blocks
+    # stdio_init_all() up to this long for the host to be USB-configured (see
+    # PICO_STDIO_USB_CONNECTION_WITHOUT_DTR below) -- which never happens at
+    # all on a standalone boot with no host attached, so this is a guaranteed
+    # tax on every power-on, not just a worst case. Kept short rather than 0
+    # so a terminal already open at flash/reset time still catches the early
+    # banner (PLAN.md Phase 11 perf pass — see repo memory boot-time notes).
+    PICO_STDIO_USB_CONNECT_WAIT_TIMEOUT_MS=1000
     # By default the SDK only writes CDC output while the host asserts DTR,
     # which most terminal apps (CoolTerm, screen, etc.) don't do unless you
     # dig up a "DTR on connect" option — with it off, every printf is
@@ -56,6 +64,11 @@ target_link_libraries(6502-picocalc
     # timer — and pico_flash carries its NVRAM (machine/nvram.c).
     pico_aon_timer
     pico_flash
+    # Boot-time overclock (main.c, PLAN.md Phase 11): hardware_clocks for
+    # set_sys_clock_khz(), hardware_vreg for the voltage bump that goes with
+    # running above the 133MHz rated-safe default.
+    hardware_clocks
+    hardware_vreg
 )
 
 pico_add_extra_outputs(6502-picocalc)

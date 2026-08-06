@@ -75,8 +75,6 @@ struct vrEmu6502_s
   uint16_t tmpAddr;
 
   const vrEmu6502Opcode* opcodes;
-  const char* mnemonicNames[256];
-  vrEmu6502AddrMode addrModes[256];
 };
 
 /* ------------------------------------------------------------------
@@ -209,6 +207,50 @@ static const char* opcodeToMnemonicStr(VrEmu6502* vr6502, uint8_t opcode);
 
 /* ------------------------------------------------------------------
  *
+ * shared setup for vrEmu6502New() and vrEmu6502NewInPlace()
+ */
+static void vrEmu6502Init(
+  VrEmu6502* vr6502,
+  vrEmu6502Model model,
+  vrEmu6502MemRead readFn,
+  vrEmu6502MemWrite writeFn)
+{
+  vr6502->model = model;
+  vr6502->readFn = readFn;
+  vr6502->writeFn = writeFn;
+
+  vr6502->zpBase = 0x0;
+  vr6502->spBase = 0x100;
+
+  switch (model)
+  {
+    case CPU_65C02:
+      vr6502->opcodes = std65c02;
+      break;
+
+    case CPU_W65C02:
+      vr6502->opcodes = wdc65c02;
+      break;
+
+    case CPU_R65C02:
+      vr6502->opcodes = r65c02;
+      break;
+
+    case CPU_6502U:
+      vr6502->model = CPU_6502;
+      vr6502->opcodes = std6502U;
+      break;
+
+    default:
+      vr6502->opcodes = std6502;
+      break;
+  }
+
+  vrEmu6502Reset(vr6502);
+}
+
+/* ------------------------------------------------------------------
+ *
  * create a new 6502
  */
 VR_EMU_6502_DLLEXPORT VrEmu6502* vrEmu6502New(
@@ -222,48 +264,38 @@ VR_EMU_6502_DLLEXPORT VrEmu6502* vrEmu6502New(
   VrEmu6502* vr6502 = (VrEmu6502*)malloc(sizeof(VrEmu6502));
   if (vr6502 != NULL)
   {
-    vr6502->model = model;
-    vr6502->readFn = readFn;
-    vr6502->writeFn = writeFn;
-
-    vr6502->zpBase = 0x0;
-    vr6502->spBase = 0x100;
-
-    switch (model)
-    {
-      case CPU_65C02:
-        vr6502->opcodes = std65c02;
-        break;
-
-      case CPU_W65C02:
-        vr6502->opcodes = wdc65c02;
-        break;
-
-      case CPU_R65C02:
-        vr6502->opcodes = r65c02;
-        break;
-
-      case CPU_6502U:
-        vr6502->model = CPU_6502;
-        vr6502->opcodes = std6502U;
-        break;
-
-      default:
-        vr6502->opcodes = std6502;
-        break;
-    }
-
-    /* build mnemonic name cache */
-    for (int i = 0; i <= 0xff; ++i)
-    {
-      vr6502->mnemonicNames[i] = opcodeToMnemonicStr(vr6502, i & 0xff);
-      vr6502->addrModes[i] = opcodeToAddrMode(vr6502, i & 0xff);
-    }
-
-    vrEmu6502Reset(vr6502);
+    vrEmu6502Init(vr6502, model, readFn, writeFn);
   }
 
   return vr6502;
+}
+
+/* ------------------------------------------------------------------
+ *
+ * create a new 6502 in caller-supplied storage
+ */
+VR_EMU_6502_DLLEXPORT VrEmu6502* vrEmu6502NewInPlace(
+  void* mem,
+  vrEmu6502Model model,
+  vrEmu6502MemRead readFn,
+  vrEmu6502MemWrite writeFn)
+{
+  assert(mem);
+  assert(readFn);
+  assert(writeFn);
+
+  VrEmu6502* vr6502 = (VrEmu6502*)mem;
+  vrEmu6502Init(vr6502, model, readFn, writeFn);
+  return vr6502;
+}
+
+/* ------------------------------------------------------------------
+ *
+ * size in bytes of a VrEmu6502 instance
+ */
+VR_EMU_6502_DLLEXPORT size_t vrEmu6502Size(void)
+{
+  return sizeof(VrEmu6502);
 }
 
 /* ------------------------------------------------------------------
@@ -521,7 +553,7 @@ VR_EMU_6502_DLLEXPORT uint8_t vrEmu6502GetOpcodeCycle(VrEmu6502* vr6502)
  */
 VR_EMU_6502_DLLEXPORT const char* vrEmu6502OpcodeToMnemonicStr(VrEmu6502* vr6502, uint8_t opcode)
 {
-  return vr6502->mnemonicNames[opcode];
+  return opcodeToMnemonicStr(vr6502, opcode);
 }
 
 /* ------------------------------------------------------------------
@@ -531,7 +563,7 @@ VR_EMU_6502_DLLEXPORT const char* vrEmu6502OpcodeToMnemonicStr(VrEmu6502* vr6502
 VR_EMU_6502_DLLEXPORT
 vrEmu6502AddrMode vrEmu6502GetOpcodeAddrMode(VrEmu6502* vr6502, uint8_t opcode)
 {
-  return vr6502->addrModes[opcode];
+  return opcodeToAddrMode(vr6502, opcode);
 }
 
 /* ------------------------------------------------------------------
@@ -2125,8 +2157,6 @@ static const vrEmu6502Opcode* r65c02 = _r65c02;
 
 /* ------------------------------------------------------------------
  *  return addressing mode for an opcode
- *  Note: all values are cached in VrEmu6502.addrModes, so calling
- *        the public vrEmu6502GetOpcodeAddrMode() function will be fast
  * ----------------------------------------------------------------*/
 static vrEmu6502AddrMode opcodeToAddrMode(VrEmu6502* vr6502, uint8_t opcode)
 {
@@ -2157,8 +2187,6 @@ static vrEmu6502AddrMode opcodeToAddrMode(VrEmu6502* vr6502, uint8_t opcode)
 
 /* ------------------------------------------------------------------
  *  return opcode mnemonic string from opcode value
- *  Note: all values are cached in VrEmu6502.mnemonicNames, so calling
- *        the public vrEmu6502OpcodeToMnemonicStr() function will be fast
  * ----------------------------------------------------------------*/
 static const char* opcodeToMnemonicStr(VrEmu6502* vr6502, uint8_t opcode)
 {

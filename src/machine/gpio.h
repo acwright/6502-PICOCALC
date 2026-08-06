@@ -36,8 +36,8 @@ uint8_t gpio_read(uint16_t addr);
 void gpio_write(uint16_t addr, uint8_t value);
 
 // Call once per emulated CPU clock tick (mirrors serial_tick()/video_tick()).
-// Advances VIA Timer 1 and returns 0x80 when an enabled interrupt (T1 or the
-// keyboard's CB1 data-ready) is pending, 0x00 otherwise.
+// Advances VIA Timers 1 and 2 and returns 0x80 when an enabled interrupt (a
+// timer or the keyboard's CB1 data-ready) is pending, 0x00 otherwise.
 uint8_t gpio_tick(void);
 
 // Feeds one decoded keystroke (already Ctrl-remapped ASCII, from

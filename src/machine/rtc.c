@@ -5,6 +5,7 @@
 #include <time.h>
 
 #include "pico/aon_timer.h"
+#include "pico.h"
 #include "pico/time.h"
 
 #include "nvram.h"
@@ -387,6 +388,13 @@ void rtc_card_write(uint16_t addr, uint8_t value) {
     }
 }
 
+// Deliberately left in flash, unlike the other cards' tick()s (PLAN.md
+// Phase 11 perf pass — see machine.c's bus_read()/bus_write()): -O3 pulls
+// refresh_from_clock() far enough into this function's inlining decision
+// that marking it RAM-resident cost ~700 bytes of scarce RP2040 SRAM for a
+// path that's cold 1023 ticks out of 1024 (RTC_TICKS_PER_REFRESH) -- a bad
+// trade next to bus_read()/bus_write()/machine_run(), which are hot on
+// every single tick.
 uint8_t rtc_card_tick(void) {
     if (++refresh_counter < RTC_TICKS_PER_REFRESH) return 0x00;
     refresh_counter = 0;

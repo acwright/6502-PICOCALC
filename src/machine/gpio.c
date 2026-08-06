@@ -2,6 +2,8 @@
 
 #include <stdbool.h>
 
+#include "pico.h"
+
 // 65C22 VIA register offsets within the slot (see BIOS.inc GPIO_* and
 // 6502-DEV's GPIOCard.h VIA_* constants — this must match).
 #define VIA_ORB     0x00
@@ -33,8 +35,10 @@
 
 static uint8_t orb, ora, ddrb, ddra;
 static uint16_t t1c, t1l;
-static uint8_t t2cl, t2ch, sr, acr, pcr, ifr, ier;
-static bool t1_running;
+static uint16_t t2c;
+static uint8_t t2l; // T2 latches the low byte only, as the 6522 does
+static uint8_t sr, acr, pcr, ifr, ier;
+static bool t1_running, t2_running;
 
 // Derived from PCR bits 7-5 (CB2 mode): manual-output-low ($C0) enables the
 // matrix keyboard encoder, manual-output-high ($E0) disables it — see
@@ -49,7 +53,10 @@ static bool kb_data_ready;
 static uint8_t joy1_buttons;
 static uint8_t joy2_buttons;
 
-static void update_irq(void) {
+// RAM-resident along with gpio_tick() below: called from machine_run() on
+// every emulated cycle (PLAN.md Phase 11 perf pass — see machine.c's
+// bus_read()/bus_write() for the measurement and full reasoning).
+static void __not_in_flash_func(update_irq)(void) {
     if (ifr & ier & 0x7F) {
         ifr |= IRQ_IRQ;
     } else {
@@ -87,8 +94,10 @@ static uint8_t read_port_b(void) {
 void gpio_reset(void) {
     orb = ora = ddrb = ddra = 0x00;
     t1c = t1l = 0xFFFF;
-    t2cl = t2ch = sr = acr = pcr = ifr = ier = 0x00;
-    t1_running = false;
+    t2c = 0xFFFF;
+    t2l = 0xFF;
+    sr = acr = pcr = ifr = ier = 0x00;
+    t1_running = t2_running = false;
     cb2_enabled = false;
     kb_ascii = 0;
     kb_data_ready = false;
@@ -135,10 +144,12 @@ uint8_t gpio_read(uint16_t addr) {
             value = (uint8_t) (t1l >> 8);
             break;
         case VIA_T2CL:
-            value = t2cl;
+            ifr &= ~IRQ_T2;
+            update_irq();
+            value = (uint8_t) (t2c & 0xFF);
             break;
         case VIA_T2CH:
-            value = t2ch;
+            value = (uint8_t) (t2c >> 8);
             break;
         case VIA_SR:
             value = sr;
@@ -200,10 +211,15 @@ void gpio_write(uint16_t addr, uint8_t value) {
             update_irq();
             break;
         case VIA_T2CL:
-            t2cl = value;
+            t2l = value; // low latch only
             break;
         case VIA_T2CH:
-            t2ch = value;
+            // Loads the counter from the high byte written plus the low latch,
+            // clears the flag, and starts the one-shot.
+            t2c = (uint16_t) ((value << 8) | t2l);
+            ifr &= ~IRQ_T2;
+            update_irq();
+            t2_running = true;
             break;
         case VIA_SR:
             sr = value;
@@ -235,13 +251,26 @@ void gpio_write(uint16_t addr, uint8_t value) {
     }
 }
 
-uint8_t gpio_tick(void) {
+uint8_t __not_in_flash_func(gpio_tick)(void) {
     if (t1_running && t1c > 0) {
         t1c--;
         if (t1c == 0) {
             ifr |= IRQ_T1;
             if (acr & 0x40) t1c = t1l; // free-run: reload from latch
-            else t1_running = false;  // one-shot: stop until rewritten
+            else t1_running = false;   // one-shot: stop until rewritten
+            // ACR bit 7 puts T1 on PB7: a square wave in free-run mode, a
+            // single edge at the end of a one-shot.
+            if (acr & 0x80) orb ^= 0x80;
+        }
+    }
+
+    // T2 is one-shot only in this mode; it stops at zero and stays there until
+    // the high byte is written again.
+    if (t2_running && t2c > 0) {
+        t2c--;
+        if (t2c == 0) {
+            ifr |= IRQ_T2;
+            t2_running = false;
         }
     }
 

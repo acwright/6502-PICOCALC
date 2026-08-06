@@ -41,8 +41,9 @@
 #endif
 
 
+#include <stddef.h>
 #include <stdint.h>
-#include <stdbool.h>  
+#include <stdbool.h>
 
 /* ------------------------------------------------------------------
  * PRIVATE DATA STRUCTURE
@@ -152,7 +153,29 @@ VR_EMU_6502_DLLEXPORT VrEmu6502* vrEmu6502New(
 
 /* ------------------------------------------------------------------
  *
- * destroy a 6502
+ * create a new 6502 in caller-supplied storage instead of malloc'ing it.
+ * `mem` must be at least vrEmu6502Size() bytes and suitably aligned (a
+ * plain byte array works). For a host with a heap too small/fragile to
+ * trust for a single long-lived allocation (see 6502-picocalc's machine.c),
+ * this has no failure mode the way vrEmu6502New() has via a NULL return.
+ */
+VR_EMU_6502_DLLEXPORT VrEmu6502* vrEmu6502NewInPlace(
+                                    void* mem,
+                                    vrEmu6502Model model,
+                                    vrEmu6502MemRead readFn,
+                                    vrEmu6502MemWrite writeFn);
+
+/* ------------------------------------------------------------------
+ *
+ * size in bytes of a VrEmu6502 instance, for sizing storage passed to
+ * vrEmu6502NewInPlace()
+ */
+VR_EMU_6502_DLLEXPORT size_t vrEmu6502Size(void);
+
+/* ------------------------------------------------------------------
+ *
+ * destroy a 6502 created with vrEmu6502New(). Do not call this on one
+ * created with vrEmu6502NewInPlace() -- the caller owns that storage.
  */
 VR_EMU_6502_DLLEXPORT void vrEmu6502Destroy(VrEmu6502* vr6502);
 

@@ -121,11 +121,17 @@ region table, then slot = `(addr-$8000)>>10`).
 in RP2040 SRAM alongside the framebuffer and audio buffers. The plan therefore:
 
 - Makes expansion-RAM size a **compile-time budget** per target.
-- RP2040 default: **IO 1 present at a reduced size** (e.g. 64–128 KB) or absent;
-  BIOS `HW_PRESENT` probing means the machine boots fine either way and BASIC
+- RP2040 default: **IO 1 present at a reduced size**, IO 2 absent; BIOS
+  `HW_PRESENT` probing means the machine boots fine either way and BASIC
   (which the note says uses only BANK 0) is unaffected.
 - RP2350 default: **IO 1 full 256 KB** (BANK 0 as on real hardware); IO 2
   optional. Boards with external PSRAM can host both in full — a later stretch.
+
+Measured once the rest of the machine was built (Phase 9), the SRAM actually
+left over is **~24 KB on RP2040** and **~285 KB on RP2350** — the 150 KB of
+canvas + framebuffer dominate. So the shipped budget is **16 KB (16 banks) on
+RP2040** — the same short card 6502-DEV builds without its `MEM_EXTMEM` flag,
+not the 64–128 KB first guessed at here — and the **full 256 KB on RP2350**.
 
 Because the BIOS probes each slot and degrades gracefully, *any* of these choices
 produces a correct machine; only the amount of paged RAM differs.
@@ -250,22 +256,72 @@ rest restore the remaining cards and polish.
 **Goal:** pick and run software, like the emulator's file loading.
 - On-device menu (rendered on the LCD, driven by the keyboard) to browse SD for
   **ROMs**, **Carts**, and **Programs** (`.prg`/`.bas`), mirroring the Teensy
-  `ROMs/`, `Carts/`, `Programs/` folders and the emulator's load model.
+  `ROMs/`, `Carts/`, `Programs/` folders and the emulator's load model. Opened
+  with **F1** — the emulated keyboard has no function row, so those keys cost
+  the machine nothing — and it runs from Core 0's outer loop with the 6502
+  stopped and the renderer handed the panel back, which is what makes it
+  reachable *whatever* the machine is doing, including hung inside a bad cart.
+  It draws in the BIOS's own `$B800` character set, so it looks like the
+  machine it belongs to.
 - Program image load to `$0800` with the `VARTAB`/`ARYTAB`/`STREND` fixup, and
   cart mapping at `$C000` with ROM override — exactly as `Machine`/`ProgramImage`
-  and the Teensy `loadCart`/`loadProgram` do.
+  and the Teensy `loadCart`/`loadProgram` do. A cart file is the 32 KB AT28C256
+  image `6502-CRT` builds, of which the **last 16 KB** is what the slot shows at
+  `$C000`; taking the tail rather than skipping a fixed 16 KB means a bare 16 KB
+  build loads too.
+- **ROM and cart images live in reserved sectors at the top of flash**, not in
+  SRAM: 32 KB + 16 KB do not fit in the RP2040's ~24 KB of spare SRAM (§4), and
+  flash is the truer home anyway — a cartridge stays in the slot and a burnt
+  BIOS stays burnt across a power cycle, which is exactly what this gives.
+  Reads cost what the built-in BIOS costs, since that is a `const` array in the
+  same flash. Both are picked up by `machine_reset()` and only there, as
+  swapping a chip means powering down first; the menu always offers eject and
+  restore-built-in, so neither can strand the machine.
 - XMODEM `LOAD`/`SAVE` (no filename) over the serial console for transfers.
+  This is the BIOS's own implementation over the 6551 (Phase 8), so the work
+  here is on the card: it no longer pulls a byte off the UART or USB while its
+  receive register is still full, leaving it queued where the link's own flow
+  control can hold it back, so a 132-byte packet burst survives. Overrun is
+  reported from the UART's `OE` flag, where it can still genuinely happen.
 - **Done when:** select a cart/program from the menu and it runs; XMODEM upload
-  from a terminal loads a program.
+  from a terminal loads a program. (A *program* lands in memory and is `RUN`
+  from the BASIC prompt, as it is in the emulator; a *cart* boots on the reset
+  the launcher does for it.)
 
 ### Phase 11 — Polish, performance, release
 **Goal:** ship.
-- Backlight/brightness + battery indicator via the keyboard MCU; power/sleep.
-- Persist settings (clock speed, expansion size, last disk) to flash.
-- Performance pass: overclock as needed; confirm sustained ~1–2 MHz 6502 with
-  video+audio; tune the tick-batch size and frame cadence.
+- Backlight/brightness + battery indicator via the keyboard MCU, and a sleep
+  that blanks the backlight after an idle timeout — the machine keeps running
+  underneath it, since there is nothing here worth suspending a 6502 for.
+  The battery reading is shown raw: the controller's two bytes have no
+  documentation this port could check them against, and a percentage invented
+  from them would be a guess wearing a number's clothes.
+- Settings (clock speed, expansion size, brightness, sleep timeout) persist in
+  a flash sector of their own, below the ones `media.c` already reserves, on
+  `nvram.c`'s deferred-write pattern so adjusting a value does not erase a
+  sector per keypress. *Last disk* is not among them — there is one `CF.IMG`,
+  so there is nothing to remember. The clock is a short table of vetted steps
+  rather than a free value: this setting outlives a power cycle, so a speed
+  the chip cannot hold would come back on every boot with BOOTSEL the only way
+  out.
+- Performance pass. The fixed costs went first: a guaranteed 5s USB-CDC
+  connect wait on every boot, and an SD mount that raced the mainboard's power
+  rail (which only comes up when the physical power button is pressed, well
+  after USB powers the Pico module) — now gated on the keyboard controller
+  answering, since it sits on the same rail. Then the emulated CPU itself:
+  200MHz overclock, and the bus dispatch, tick loop and every per-cycle card
+  handler moved out of flash so they stop competing with the ROM reads for the
+  XIP cache. **The ~1–2 MHz target was not reached: ~228 kHz is where it
+  landed, and boot-to-BASIC is ~29s.** What stands between the two is the BIOS
+  being read over XIP on every instruction fetch. Copying its top 24 KB into
+  RAM is the fix, and it does not fit — measured ~6 KB short on RP2040 even
+  after giving up the expansion-RAM card entirely, and ~9 KB short on RP2350,
+  whose spare SRAM this plan had badly overestimated. Closing either gap meant
+  shrinking a core's stack with no way to load-test the result, which is a
+  silent-corruption bug traded for a boot-time win. Left slow and stable.
 - Dual-target release UF2s (Pico 1 and Pico 2); README + flashing instructions;
-  a fresh reset/power-cycle model matching the emulator's Reset vs Power-Cycle.
+  a reset/power-cycle model matching the emulator's: reset keeps RAM, power
+  cycle clears it.
 - **Done when:** both UF2s pass an on-device smoke test (boot → BASIC → LOAD →
   RUN → sound → save) and are tagged for release.
 
@@ -274,12 +330,14 @@ rest restore the remaining cards and polish.
 ## 6. Open questions — resolutions carried into the plan
 
 - **IO 1 & 2 (expansion RAM):** Size is a per-target compile budget (§4, Phase 9).
-  RP2040 ships reduced/optional; RP2350 ships BANK 0 in full; PSRAM boards can do
-  both. Graceful probing makes every choice boot correctly.
+  RP2040 ships IO 1 at 16 KB; RP2350 ships BANK 0 in full at 256 KB; IO 2 is
+  absent on both, and PSRAM boards could do both in full. Graceful probing makes
+  every choice boot correctly.
 - **Cartridges / CF / DOS:** CF is emulated against a disk-image file on the SD
   card (Phase 7), so `LOAD`/`SAVE`/`DIR` and `BLOAD`/`BSAVE` all work. Cartridges
-  load from SD via the launcher and map at `$C000` (Phase 10). XMODEM over serial
-  remains as the terminal path (Phase 10).
+  load from SD via the launcher into reserved flash sectors and map at `$C000`,
+  staying in the slot across a power cycle like the chip they stand in for
+  (Phase 10). XMODEM over serial remains as the terminal path (Phase 10).
 - **RTC:** Supported via the Pico's on-chip RTC/AON timer, with NVRAM in the top
   sector of flash (Phase 8). The one thing the emulated part cannot have is a
   battery: the clock keeps time across a reset but not across a power cycle, and

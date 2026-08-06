@@ -91,7 +91,10 @@ void sound_write(uint16_t addr, uint8_t value) {
     publish();
 }
 
-uint8_t sound_tick(void) {
+// RAM-resident (PLAN.md Phase 11 perf pass — see machine.c's bus_read()/
+// bus_write() for the measurement and full reasoning): called from
+// machine_run() on every emulated cycle, same as the other cards' tick()s.
+uint8_t __not_in_flash_func(sound_tick)(void) {
     // Advance voice 3's phase accumulator for the OSC3 readback above.
     uint16_t freq = (uint16_t) (((uint16_t) registers[SID_V3_FREQ_HI] << 8) | registers[SID_V3_FREQ_LO]);
     uint32_t prev = v3_accumulator;

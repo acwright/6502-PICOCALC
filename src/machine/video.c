@@ -2,6 +2,8 @@
 
 #include <string.h>
 
+#include "pico.h"
+
 // Frame-interrupt (vblank) timing assumes a nominal 1MHz 6502 clock, matching
 // 6502-DEV's cachedCpuFrequency default. The tick loop (machine_run) isn't
 // actually paced to this rate yet (see PLAN.md Phase 11), so on real hardware
@@ -54,9 +56,11 @@ uint8_t video_read(uint16_t slot_addr) {
             first_byte = 1;
             return val;
         }
-        case 1: { // status register: read clears the frame-interrupt flag
+        case 1: { // status register: the read clears *all* of it, not just the
+                  // frame-interrupt flag — the fifth-sprite and collision bits
+                  // go with it, as on the real part.
             uint8_t s = status;
-            status &= (uint8_t) ~VIDEO_STATUS_IRQ;
+            status = 0;
             first_byte = 1;
             return s;
         }
@@ -69,6 +73,10 @@ void video_write(uint16_t slot_addr, uint8_t value) {
     switch (slot_addr & 0x01) {
         case 0: // data port: write VRAM, auto-increment
             vram[addr & 0x3FFF] = value;
+            // A write loads the read-ahead buffer too, so a read taken
+            // straight after one returns the byte just written rather than
+            // whatever the last prefetch left behind.
+            read_buf = value;
             addr = (addr + 1) & 0x3FFF;
             first_byte = 1;
             break;
@@ -94,20 +102,29 @@ void video_write(uint16_t slot_addr, uint8_t value) {
     }
 }
 
-static void video_snapshot(void) {
+// RAM-resident along with video_tick() below: called from machine_run() on
+// every emulated cycle (PLAN.md Phase 11 perf pass — see machine.c's
+// bus_read()/bus_write() for the measurement and full reasoning).
+static void __not_in_flash_func(video_snapshot)(void) {
     memcpy(shared_vram, vram, sizeof(shared_vram));
     memcpy(shared_registers, registers, sizeof(shared_registers));
 }
 
-uint8_t video_tick(void) {
-    cycle_count++;
-    if (cycle_count < cycles_per_frame) return 0x00;
+uint8_t __not_in_flash_func(video_tick)(void) {
+    if (++cycle_count >= cycles_per_frame) {
+        cycle_count = 0;
+        // The flag is only raised at all when R1's interrupt-enable bit is
+        // set; with it clear the part never asserts its interrupt line, which
+        // is the state the BIOS leaves it in (InitVideo writes R1 = $D0).
+        if (registers[1] & VIDEO_R1_IE) status |= VIDEO_STATUS_IRQ;
+        video_snapshot();
+    }
 
-    cycle_count = 0;
-    status |= VIDEO_STATUS_IRQ;
-    video_snapshot();
-
-    return (registers[1] & VIDEO_R1_IE) ? 0x80 : 0x00;
+    // Level, not a pulse: the line stays down until the CPU reads the status
+    // register, exactly as the real part holds it. Returning 0x80 for the one
+    // tick the frame happened to end on would only be seen if that tick fell
+    // on an instruction boundary, so most frames' interrupts would be missed.
+    return (status & VIDEO_STATUS_IRQ) ? 0x80 : 0x00;
 }
 
 const uint8_t *video_snapshot_vram(void) {

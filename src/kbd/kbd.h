@@ -5,41 +5,58 @@
 #ifndef KBD_H
 #define KBD_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
-// Special (non-ASCII) key code the controller reports for the physical
-// Ctrl key itself, so it can be tracked as a held modifier below.
-#define KBD_KEY_CTRL 0x7E
-
-// The controller's own Enter key code (see clockworkpi/PicoCalc's
-// keyboard.h KEY_ENTER) -- it is 0x0A, NOT ASCII CR. kbd_decode() remaps it
-// to CR (0x0D) since that's what the emulated console (BIOS/BASIC's line
-// editor) checks for end-of-line, same as a serial terminal's Enter key.
-#define KBD_KEY_ENTER_RAW 0x0A
-
-// The controller's own Esc key code (clockworkpi/PicoCalc's keyboard.h
-// KEY_ESC) -- it is 0xB1, NOT ASCII ESC. kbd_decode() remaps it to 0x1B
-// since that's the byte BASIC's BasCheckBreak polls for to break a running
-// program (along with Ctrl-C); left unmapped, ESC presses were silently
-// swallowed and could never interrupt a RUNning loop.
-#define KBD_KEY_ESC_RAW 0xB1
-
-// Arrow-key codes from the controller's own key set (clockworkpi/PicoCalc
-// Code/picocalc_keyboard/keyboard.h KEY_LEFT..KEY_RIGHT). They pass through
-// kbd_decode() unchanged, and also drive the emulated joystick below.
+// The controller's own key codes, from clockworkpi/PicoCalc's
+// Code/picocalc_keyboard/keyboard.h. Anything above $7F is the controller's
+// private numbering, not ASCII, and kbd_decode() either translates it to the
+// byte the emulated keyboard encoder would put on the port or drops it.
+#define KBD_KEY_ENTER_RAW 0x0A // controller sends LF; the machine wants CR
+#define KBD_KEY_ESC_RAW   0xB1
 #define KBD_KEY_LEFT_RAW  0xB4
 #define KBD_KEY_UP_RAW    0xB5
 #define KBD_KEY_DOWN_RAW  0xB6
 #define KBD_KEY_RIGHT_RAW 0xB7
+#define KBD_KEY_INSERT    0xD1
+#define KBD_KEY_DEL       0xD4
+
+// Keys the emulated machine's keyboard does not have, so kbd_decode() drops
+// them and they are free for the firmware's own use: F1 opens the launcher,
+// which pages its lists with Page Up/Down (src/launcher/launcher.h, PLAN.md
+// Phase 10).
+#define KBD_KEY_F1        0x81
+#define KBD_KEY_F10       0x8A
+#define KBD_KEY_PAGE_UP   0xD6
+#define KBD_KEY_PAGE_DOWN 0xD7
+
+// The controller's event states, as reported in the first byte of a FIFO
+// read. Callers that want the raw stream (kbd_poll_raw()) need these to tell
+// a press from the hold repeats and the release that follow it.
+#define KBD_STATE_PRESS   1
+#define KBD_STATE_HOLD    2
+#define KBD_STATE_RELEASE 3
+
+// The modifier keys. The controller applies Shift and Sym itself (they arrive
+// as the shifted character), so only Ctrl has to be tracked here; the rest are
+// swallowed, which is also what the real machine does — see the DOCS keyboard
+// chapter, where Caps Lock, Menu, Alt and Fn "send nothing at all".
+#define KBD_KEY_MOD_ALT   0xA1
+#define KBD_KEY_MOD_SHL   0xA2
+#define KBD_KEY_MOD_SHR   0xA3
+#define KBD_KEY_MOD_SYM   0xA4
+#define KBD_KEY_MOD_CTRL  0xA5
+// An older reading of the controller's key set had Ctrl here. Kept alongside
+// $A5 so the modifier is tracked whichever code this board's firmware sends.
+#define KBD_KEY_MOD_CTRL_ALT 0x7E
 
 // Brings up I2C1 at the controller's fixed 10kHz bus speed. Must be called
 // once before any other kbd_* call.
 void kbd_init(void);
 
-// Polls the controller's key FIFO (register 0x09) once. Returns the ASCII
-// code of a newly *pressed* key, or -1 if nothing new/on error. Held Ctrl
-// remaps a-z to the corresponding control code (Ctrl-A=1 .. Ctrl-Z=26), as
-// the emulated 6551 console expects.
+// Polls the controller's key FIFO (register 0x09) once. Returns the byte a
+// newly *pressed* key hands to the machine, or -1 if nothing new / on error.
+// See kbd_decode() for what that byte is.
 int kbd_poll(void);
 
 // Raw FIFO read for diagnostics: 0 on a successful I2C round trip (state
@@ -49,8 +66,28 @@ int kbd_poll(void);
 // responding" apart from "no key pressed".
 int kbd_poll_raw(uint8_t *state, uint8_t *code);
 
-// Applies the same press/Ctrl-modifier decode as kbd_poll() to an
-// already-read (state, code) pair.
+// Polls the controller until it ACKs on the bus or `timeout_ms` elapses.
+// Returns true if it answered in time.
+//
+// The controller -- and everything else on the mainboard's own switched
+// power rail: LCD, SD slot -- doesn't come up until the PicoCalc's physical
+// power button is pressed. When serial is wired through the Pico module's
+// own USB port rather than the mainboard's, that port powers the RP2040
+// immediately on plug-in, well before the button is (or can be) pressed, so
+// anything that touches the SD card or prints a boot banner right away is
+// racing hardware that isn't there yet (see repo memory / PLAN.md Phase 11).
+// Call this before any of that so it waits out the gap instead of racing it.
+bool kbd_wait_ready(uint32_t timeout_ms);
+
+// Turns an already-read (state, code) pair into the byte the machine's
+// keyboard encoder would put on the VIA port, or -1 for "nothing to hand
+// over". This is the emulated encoder's mapping, not the PicoCalc's: letters
+// are always capitals (the ACE has no lower case from the keyboard at all —
+// see the DOCS keyboard chapter), Ctrl+letter gives control codes 1-26,
+// Ctrl+[ \ ] 2 6 - give $1B $1C $1D $00 $1E $1F, Enter is CR, and the arrows,
+// Ins and Del carry the codes the reference encoder assigns them. Keys the
+// machine has no equivalent for — the function row, Caps Lock, Home/End/PgUp/
+// PgDn, and the modifiers themselves — send nothing.
 int kbd_decode(uint8_t state, uint8_t code);
 
 // The emulated joystick's currently-held buttons, as a mask of the VIA
