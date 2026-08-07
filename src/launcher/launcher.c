@@ -161,7 +161,7 @@ static launcher_key_t wait_key(void) {
 
 static void show_status(const char *text) {
     clear_rows(ROW_STATUS, 1);
-    draw_text(1, ROW_STATUS, text, LCD_COLOR_YELLOW, COLOR_BG);
+    draw_text(1, ROW_STATUS, text, LCD_COLOR_WHITE, COLOR_BG);
     lcd_present();
 }
 
@@ -177,7 +177,7 @@ static void show_progress(uint32_t done, uint32_t total) {
 // Waits for any key, so a message is read before the screen it is on goes.
 static void show_message_and_wait(const char *text) {
     clear_rows(ROW_STATUS, 1);
-    draw_text(1, ROW_STATUS, text, LCD_COLOR_YELLOW, COLOR_BG);
+    draw_text(1, ROW_STATUS, text, LCD_COLOR_WHITE, COLOR_BG);
     draw_bar(ROW_KEYS, "PRESS ANY KEY", NULL);
     lcd_present();
     wait_key();
@@ -572,7 +572,7 @@ static void run_settings(void) {
         draw_text(1, ROW_LIST + SETTING_COUNT + 1, battery, COLOR_DIM, COLOR_BG);
 
         if (settings_clock_index() != clock_was) {
-            draw_text(1, ROW_STATUS, "CLOCK CHANGES ON NEXT POWER-ON", LCD_COLOR_YELLOW, COLOR_BG);
+            draw_text(1, ROW_STATUS, "CLOCK CHANGES ON NEXT POWER-ON", LCD_COLOR_WHITE, COLOR_BG);
         }
 
         draw_bar(ROW_KEYS, "LEFT/RIGHT CHANGE   ESC BACK", NULL);
@@ -614,9 +614,9 @@ void launcher_run(void) {
     // has to belong to one of us at a time.
     video_render_suspend();
 
-    lcd_set_palette(COLOR_BG, lcd_rgb565(0, 0, 64));
-    lcd_set_palette(COLOR_DIM, lcd_rgb565(140, 160, 200));
-    lcd_set_palette(COLOR_ACCENT, lcd_rgb565(120, 190, 255));
+    lcd_set_palette(COLOR_BG, lcd_rgb565(0, 0, 0));
+    lcd_set_palette(COLOR_DIM, lcd_rgb565(150, 150, 150));
+    lcd_set_palette(COLOR_ACCENT, lcd_rgb565(200, 200, 200));
     lcd_clear(COLOR_BG);
 
     int selected = 0, top = 0;
