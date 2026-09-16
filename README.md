@@ -28,18 +28,25 @@ synthesises the SID.
 |---|---|
 | **CPU** | W65C02S via [vrEmu6502](https://github.com/visrealm/vrEmu6502), full opcode set, IRQ / NMI |
 | **RAM** | 32 KB system RAM + banked expansion (see [Pico 1 vs Pico 2](#pico-1-vs-pico-2)) |
-| **ROM** | 32 KB BIOS in flash, replaceable from the SD card |
+| **ROM** | 32 KB BIOS **v1.6** in flash, replaceable from the SD card |
 | **Video** | TMS9918A VDP, 16 KB VRAM — rendered to the PicoCalc's 320×320 LCD |
 | **Audio** | MOS 6581 SID — synthesised to the PWM speaker pins |
 | **Serial** | 6551 ACIA — bridged to USB CDC *and* the side-header UART, both live at once |
 | **Storage** | CompactFlash 8-bit IDE — `CF.IMG` on the SD card, 256 × 1 MB banks |
-| **RTC / NVRAM** | DS1511Y+ — clock plus 256 B of NVRAM, kept in flash |
+| **RTC / NVRAM** | DS1511Y+ — clock plus 256 B of NVRAM, kept in flash, with burst mode for the BIOS's save slots |
 | **GPIO** | 6522 VIA — keyboard on port B, fed from the PicoCalc's I2C keyboard, plus a joystick on each port |
 
 Two places knowingly differ from the reference: the VDP status register's
 fifth-sprite and collision bits always read 0 (sprites are rasterised on the
 other core), and the emulated CPU is not paced to a fixed clock rate — it runs
 as fast as the board manages. Nothing in the BIOS or BASIC depends on either.
+
+The embedded ROM is BIOS **v1.6**, the last 1.x release. The PicoCalc is a
+TMS9918A machine and stays on the 1.x line, so this is the BIOS it keeps. 1.6
+adds the Kernal's NVRAM save slots: 16 slots of 14 bytes, each with an owner ID
+and a checksum. The NVRAM here is flash-backed, so saves survive a power cycle
+like the battery-backed part. A change is committed about two seconds after
+the last write, so a save needs that long before power is cut.
 
 ---
 
@@ -206,7 +213,7 @@ src/
 
 - [6502-ACE](https://github.com/acwright/6502-ACE) — the real machine, and the index of the whole family
 - [6502-DOCS](https://github.com/acwright/6502-DOCS) — the user's and programmer's guide ([read it here](https://acwright.github.io/6502-DOCS/))
-- [6502-BIOS](https://github.com/acwright/6502-BIOS) — firmware source; the ROM embedded here is built from it
+- [6502-BIOS](https://github.com/acwright/6502-BIOS) — firmware source; the ROM embedded here is its `v1.6` build
 - [6502-EMULATOR](https://github.com/acwright/6502-EMULATOR) — the desktop and web emulator, and the reference this port's I/O cards match
 - [6502-DEV](https://github.com/acwright/6502-DEV) — the Teensy development firmware this port's structure came from
 - [6502-PRG](https://github.com/acwright/6502-PRG) / [6502-CRT](https://github.com/acwright/6502-CRT) — templates for the programs and cartridges the launcher loads
