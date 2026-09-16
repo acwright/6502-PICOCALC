@@ -3,3 +3,5 @@ build/
 
 # Vendored as a plain clone for now (not a git submodule yet - see session memory).
 pico-sdk/
+
+.DS_Store
