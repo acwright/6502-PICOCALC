@@ -48,6 +48,16 @@ and a checksum. The NVRAM here is flash-backed, so saves survive a power cycle
 like the battery-backed part. A change is committed about two seconds after
 the last write, so a save needs that long before power is cut.
 
+The image is the `v1.6` tag's `BIOS.bin` (SHA-256
+`4b4154af…e210d8c56`), which was reissued to fix the serial flow control
+against a real R6551. Only the Kernal's serial code moves, so nothing this port
+reads by address changes. Re-embed it with:
+
+```
+./embed-rom.sh                # re-read the v1.6 tag from a sibling 6502-BIOS
+./embed-rom.sh --check        # fail if the embedded bytes are not that tag's
+```
+
 ---
 
 ## Requirements
@@ -205,6 +215,8 @@ src/
   fatfs/          FatFs, for the SD card
   launcher/       The F1 launcher — file browser, slots, settings
   main.c          Boot, the Core 0 run loop, and the USB CDC console
+build.sh          Configures and builds the .uf2 for one or both boards
+embed-rom.sh      Regenerates src/rom/bios_rom.c from a 6502-BIOS tag
 ```
 
 ---

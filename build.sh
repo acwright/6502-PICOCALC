@@ -11,10 +11,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # The gcc-arm-embedded Homebrew cask installs via a GUI pkg installer, which
-# can't be authorized headlessly, so the toolchain here is a plain tarball
-# extracted to ~/toolchains instead. Override TOOLCHAIN_BIN if yours differs.
+# can't be authorized headlessly, so the toolchain may be a plain tarball
+# extracted to ~/toolchains instead. Set TOOLCHAIN_BIN if yours differs; an
+# arm-none-eabi-gcc already on PATH (Homebrew's formula, say) is used as is.
 TOOLCHAIN_BIN="${TOOLCHAIN_BIN:-$HOME/toolchains/arm-gnu-toolchain-15.2.rel1-darwin-arm64-arm-none-eabi/bin}"
-export PATH="$TOOLCHAIN_BIN:$PATH"
+if [ -d "$TOOLCHAIN_BIN" ]; then
+    export PATH="$TOOLCHAIN_BIN:$PATH"
+elif ! command -v arm-none-eabi-gcc >/dev/null 2>&1; then
+    echo "build.sh: no arm-none-eabi-gcc on PATH and no toolchain at $TOOLCHAIN_BIN" >&2
+    exit 1
+fi
 export PICO_SDK_PATH="$SCRIPT_DIR/pico-sdk"
 
 BOARDS=("$@")
