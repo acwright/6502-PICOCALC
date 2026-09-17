@@ -36,10 +36,23 @@ synthesises the SID.
 | **RTC / NVRAM** | DS1511Y+ — clock plus 256 B of NVRAM, kept in flash, with burst mode for the BIOS's save slots |
 | **GPIO** | 6522 VIA — keyboard on port B, fed from the PicoCalc's I2C keyboard, plus a joystick on each port |
 
-Two places knowingly differ from the reference: the VDP status register's
+Three places knowingly differ from the reference: the VDP status register's
 fifth-sprite and collision bits always read 0 (sprites are rasterised on the
-other core), and the emulated CPU is not paced to a fixed clock rate — it runs
-as fast as the board manages. Nothing in the BIOS or BASIC depends on either.
+other core); the emulated CPU is not paced to a fixed clock rate — it runs as
+fast as the board manages; and a byte that arrives while the ACIA's receiver is
+off waits on the link instead of being lost on the wire, which only matters for
+the few hundred cycles between reset and the BIOS's `InitSC`. Nothing in the
+BIOS or BASIC depends on any of them.
+
+The ACIA is otherwise the Rockwell R6551 exactly, down to the parts of it that
+firmware can hang on: DSR and DCD are active low and both read 0 for the
+permanently connected, permanently ready peer on the other end of the USB
+console and the side header; clearing DTR (command bit 0) turns the receiver,
+the transmitter and the interrupts off; and a TIC of `00` (command bits 3-2)
+raises RTS *and* stops the transmitter, so a byte written then sits in the
+transmit register with TDRE clear until RTS comes back down. That last one was
+proved on the bench against a real R6551, and the embedded BIOS v1.6 below is
+the reissue that copes with it.
 
 The embedded ROM is BIOS **v1.6**, the last 1.x release. The PicoCalc is a
 TMS9918A machine and stays on the 1.x line, so this is the BIOS it keeps. 1.6
