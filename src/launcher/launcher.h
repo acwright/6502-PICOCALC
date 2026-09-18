@@ -27,4 +27,12 @@ bool launcher_hotkey(uint8_t state, uint8_t code);
 // which case this resets it before returning).
 void launcher_run(void);
 
+// Shown once at boot, and only when a ROM loaded from the SD card is standing
+// in front of a built-in BIOS this firmware has since replaced
+// (media_rom_override_stale()) — otherwise it returns immediately and nothing
+// is drawn. Dismissed by any key, and by a timer if nobody is there, so it can
+// never hold up an unattended boot. Call it after machine_init(), which is
+// what reads the ROM socket, and before the run loop.
+void launcher_boot_notice(void);
+
 #endif

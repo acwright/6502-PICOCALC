@@ -28,7 +28,7 @@ synthesises the SID.
 |---|---|
 | **CPU** | W65C02S via [vrEmu6502](https://github.com/visrealm/vrEmu6502), full opcode set, IRQ / NMI |
 | **RAM** | 32 KB system RAM + banked expansion (see [Pico 1 vs Pico 2](#pico-1-vs-pico-2)) |
-| **ROM** | 32 KB BIOS **v1.6** in flash, replaceable from the SD card |
+| **ROM** | 32 KB BIOS **v1.6** in flash, replaceable from the SD card (see [The ROM socket](#the-rom-socket)) |
 | **Video** | TMS9918A VDP, 16 KB VRAM — rendered to the PicoCalc's 320×320 LCD |
 | **Audio** | MOS 6581 SID — synthesised to the PWM speaker pins |
 | **Serial** | 6551 ACIA — bridged to USB CDC *and* the side-header UART, both live at once |
@@ -69,6 +69,46 @@ reads by address changes. Re-embed it with:
 ```
 ./embed-rom.sh                # re-read the v1.6 tag from a sibling 6502-BIOS
 ./embed-rom.sh --check        # fail if the embedded bytes are not that tag's
+```
+
+### The ROM socket
+
+**Load ROM** in the launcher puts a 32 KB image from `/ROMs` into flash and the
+machine boots that instead of the built-in BIOS, the way a replacement chip in
+the socket would. It stays there until **Restore built-in BIOS** takes it out.
+
+A ROM loaded this way **survives a firmware update**. The `.uf2` rewrites the
+firmware at the bottom of flash; the ROM image and the record naming it live at
+the top and are not touched. That is the right behaviour for a chip in a
+socket — and it is also a trap, because a firmware release whose point is a new
+built-in BIOS will come up still running the old ROM.
+
+Two things guard against it:
+
+- The launcher's header names the built-in BIOS **with its version** —
+  `ROM:  BUILT-IN BIOS v1.6` — so what is actually running is readable at a
+  glance, and so is the name of a loaded ROM when one is in the socket.
+- The firmware remembers which built-in BIOS a ROM was loaded over. If a later
+  firmware ships a different one, the machine says so on screen at boot: it
+  names the ROM, says the built-in BIOS is newer, and points at **F1 → Restore
+  built-in BIOS**. Any key dismisses it, and it clears itself after ten
+  seconds, so an unattended boot is never held up. It is shown once per
+  power-on and keeps coming back while it is still true; restoring the built-in
+  BIOS, or loading the ROM again over the current BIOS, ends it. The same
+  warning sits on the launcher's header in the meantime.
+
+Upgrading from **v1.0.3 or earlier** clears the ROM socket once, on first boot:
+those builds recorded no BIOS to compare against, so every machine that had ever
+loaded a ROM was silently running it. Such a machine comes up on the built-in
+BIOS v1.6, which is what flashing a firmware release is meant to mean. The image
+is still in flash and the file is still on the SD card — **Load ROM** puts it
+back. **A loaded cartridge is not affected**, and neither are settings, NVRAM or
+`CF.IMG`.
+
+The serial console names the ROM at boot too:
+
+```
+ROM: built-in BIOS v1.6
 ```
 
 ---
@@ -112,6 +152,11 @@ The board name is passed straight through as `PICO_BOARD`. Output lands in:
 each board only accepts its own. If you are unsure which one is already on a
 board, open a serial terminal: the banner names it.
 
+Flashing replaces the firmware only. Settings, NVRAM, the cartridge slot and
+anything on the SD card carry over — as, up to v1.0.3, did a ROM loaded from
+the SD card, which is worth reading [The ROM socket](#the-rom-socket) about
+before assuming a new firmware means a new BIOS.
+
 ```
 6502-PICOCALC (board=pico, clk_sys=200000 kHz)
 ```
@@ -125,7 +170,7 @@ The launcher expects three folders, and offers to create any that are missing:
 ```
 /Programs     .bas / .prg program images, loaded to $0800
 /Carts        16 KB or 32 KB cartridge images, mapped at $C000
-/ROMs         32 KB BIOS replacements
+/ROMs         32 KB BIOS replacements (see The ROM socket)
 /CF.IMG       the emulated CompactFlash card (created on first boot)
 ```
 
@@ -174,7 +219,9 @@ Two ways to restart the machine, matching the desktop emulator:
   comes up cold.
 
 Anything saved to `CF.IMG` survives both, as does whatever is in the ROM socket
-and cartridge slot — those live in flash, like the chips they stand in for.
+and cartridge slot — those live in flash, like the chips they stand in for, and
+survive a firmware update as well. See [The ROM socket](#the-rom-socket) for
+what that means when an update brings a new built-in BIOS.
 
 ## Settings
 

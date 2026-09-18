@@ -62,6 +62,25 @@ const uint8_t *media_cart(void);
 const char *media_rom_name(void);
 const char *media_cart_name(void);
 
+// True when a ROM loaded from the SD card is sitting over a built-in BIOS that
+// has since been replaced — i.e. this firmware ships a different BIOS than the
+// one that was in the socket when that ROM was chosen. It is a standing fact
+// rather than an event, so it keeps reading true until the built-in BIOS is
+// restored or the ROM is loaded again against this one; the launcher shows it
+// on its header, and main.c says it out loud once per power-on
+// (launcher_boot_notice()).
+//
+// A ROM override surviving a firmware update is exactly what it should do — it
+// stands in for a chip in a socket — right up until the update is the one that
+// changes the chip it is standing in front of, which is when nobody was told.
+bool media_rom_override_stale(void);
+
+// The built-in BIOS's own version, read out of its banner: "v1.6", or "" if the
+// image does not word it the way the AC6502 BIOS does. Shown wherever the ROM
+// in the socket is named, so which BIOS is actually running is answerable
+// without a serial terminal.
+const char *media_builtin_rom_version(void);
+
 // Called after each flash sector, so the launcher can show progress. `done`
 // and `total` are bytes.
 typedef void (*media_progress_fn)(uint32_t done, uint32_t total);

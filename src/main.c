@@ -54,6 +54,7 @@
 #include "machine/gpio.h"
 #include "machine/sound_synth.h"
 #include "machine/storage.h"
+#include "machine/media.h"
 #include "machine/nvram.h"
 #include "machine/ram_bank.h"
 #include "machine/settings.h"
@@ -207,6 +208,24 @@ int main(void) {
     machine_init();
     boot_mark("machine_init");
 
+    // Which ROM the machine is about to boot, named rather than assumed. A
+    // ROM loaded from the SD card lives at the top of flash and a UF2 only
+    // rewrites the bottom, so an override outlives a firmware update — which
+    // is right, until the update is the one that changes the built-in BIOS.
+    // See media_rom_override_stale(), and launcher_boot_notice() below, which
+    // says the same thing on the panel for someone with no terminal attached.
+    {
+        const char *builtin = media_builtin_rom_version();
+        if (media_rom_name()[0]) {
+            printf("ROM: %s, loaded from the SD card%s\n", media_rom_name(),
+                   media_rom_override_stale()
+                       ? " -- the built-in BIOS has changed since; F1 -> RESTORE BUILT-IN BIOS"
+                       : "");
+        } else {
+            printf("ROM: built-in BIOS %s\n", builtin[0] ? builtin : "(version unknown)");
+        }
+    }
+
     // Narrow the expansion card to whatever the settings screen last asked
     // for. Must follow machine_init(), which is what sizes the cards to the
     // build's maximum in the first place.
@@ -226,6 +245,13 @@ int main(void) {
     // A cold start: this is the power coming on, not the reset button.
     machine_reset(true);
     boot_mark("machine_reset");
+
+    // Before the run loop, so the 6502 has not drawn anything yet and the panel
+    // is the firmware's to write on — and before the timers below are started,
+    // so the time spent reading it does not count against the backlight sleep
+    // or the boot-speed report. Returns at once unless there is something to
+    // say (launcher.h).
+    launcher_boot_notice();
 
     uint32_t heartbeat = 0;
     absolute_time_t last_blink = get_absolute_time();

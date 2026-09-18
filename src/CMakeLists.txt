@@ -26,7 +26,7 @@ add_executable(6502-picocalc
 target_include_directories(6502-picocalc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} fatfs cpu rom)
 
 pico_set_program_name(6502-picocalc "6502-picocalc")
-pico_set_program_version(6502-picocalc "1.0.3")
+pico_set_program_version(6502-picocalc "1.0.4")
 
 # The emulated 6502's own serial console (6551 ACIA, see src/machine/serial.c)
 # is bridged onto this same USB CDC stdio stream (PLAN.md Phase 3).

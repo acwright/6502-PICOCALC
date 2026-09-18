@@ -49,6 +49,7 @@ enum {
 #define ROW_TITLE  0
 #define ROW_ROM    2
 #define ROW_CART   3
+#define ROW_NOTE   4 // only used when there is something to say about the ROM
 #define ROW_HEAD   5
 #define ROW_LIST   7
 #define ROW_STATUS (ROWS - 3)
@@ -317,18 +318,39 @@ static const char *folder_title(folder_t which) {
     }
 }
 
+// "BUILT-IN BIOS v1.6", or just "BUILT-IN BIOS" for an image whose banner this
+// port cannot read a version out of.
+static void builtin_rom_label(char *out, size_t len) {
+    const char *version = media_builtin_rom_version();
+    snprintf(out, len, "BUILT-IN BIOS%s%s", version[0] ? " " : "", version);
+}
+
 static void draw_header(void) {
     char line[COLS + 1];
+    char builtin[32];
     const char *rom = media_rom_name();
     const char *cart = media_cart_name();
 
+    builtin_rom_label(builtin, sizeof(builtin));
+
     draw_bar(ROW_TITLE, "6502-PICOCALC", "F1");
 
-    clear_rows(ROW_ROM, 2);
-    snprintf(line, sizeof(line), "ROM:  %s", rom[0] ? rom : "BUILT-IN BIOS");
+    clear_rows(ROW_ROM, 3);
+    // Named with its version when it is the built-in one, because "which BIOS
+    // is this machine actually running" is a question this screen is the only
+    // place to ask, and the bare words "BUILT-IN BIOS" never answered it.
+    snprintf(line, sizeof(line), "ROM:  %s", rom[0] ? rom : builtin);
     draw_text(1, ROW_ROM, line, COLOR_DIM, COLOR_BG);
     snprintf(line, sizeof(line), "CART: %s", cart[0] ? cart : "NONE");
     draw_text(1, ROW_CART, line, COLOR_DIM, COLOR_BG);
+
+    // Standing warning, for as long as it is true: the boot notice is shown
+    // once per power-on and then gone, and this is where someone who dismissed
+    // it (or came here for another reason) can still see it.
+    if (media_rom_override_stale()) {
+        snprintf(line, sizeof(line), "      %s IS NEWER THAN THIS ROM", builtin);
+        draw_text(1, ROW_NOTE, line, LCD_COLOR_WHITE, COLOR_BG);
+    }
 }
 
 // Draws a scrolling list and runs it until something is chosen. Returns the
@@ -701,6 +723,75 @@ done:
     // reserved for the power-cycle item, which is the one thing a program
     // sitting in memory should not survive.
     if (reset_needed) machine_reset(cold_start);
+
+    video_render_resume();
+}
+
+// How long the boot notice below stays up on its own. Long enough to read
+// twice, short enough that a machine left to boot on a shelf is only held up
+// once, and never at all unless something really is wrong.
+#define NOTICE_TIMEOUT_MS 10000
+
+void launcher_boot_notice(void) {
+    if (!media_rom_override_stale()) return;
+
+    // The one thing the firmware ever puts on the machine's screen in its own
+    // voice, and it exists because the alternative was proved: a v1.0.3 flash
+    // whose headline was the reissued BIOS v1.6 came up running a BIOS v1.5
+    // its owner had loaded from the SD card long before, and nothing anywhere
+    // said so except a line on a launcher screen they had no reason to open.
+    video_render_suspend();
+
+    lcd_set_palette(COLOR_BG, lcd_rgb565(0, 0, 0));
+    lcd_set_palette(COLOR_DIM, lcd_rgb565(150, 150, 150));
+    lcd_set_palette(COLOR_ACCENT, lcd_rgb565(200, 200, 200));
+    lcd_clear(COLOR_BG);
+
+    char builtin[32];
+    char line[COLS + 1];
+    builtin_rom_label(builtin, sizeof(builtin));
+
+    draw_bar(ROW_TITLE, "6502-PICOCALC", "NOTICE");
+
+    draw_text(1, ROW_ROM, "THIS MACHINE IS RUNNING A ROM YOU LOADED", COLOR_DIM, COLOR_BG);
+    draw_text(1, ROW_CART, "FROM THE SD CARD:", COLOR_DIM, COLOR_BG);
+    snprintf(line, sizeof(line), "  %s", media_rom_name());
+    draw_text(1, ROW_HEAD, line, LCD_COLOR_WHITE, COLOR_BG);
+
+    snprintf(line, sizeof(line), "THE %s IS NEWER THAN THE ONE", builtin);
+    draw_text(1, ROW_LIST, line, COLOR_DIM, COLOR_BG);
+    draw_text(1, ROW_LIST + 1, "THAT ROM REPLACED.", COLOR_DIM, COLOR_BG);
+
+    draw_text(1, ROW_LIST + 3, "F1 -> RESTORE BUILT-IN BIOS SWITCHES TO IT.", COLOR_DIM, COLOR_BG);
+    draw_text(1, ROW_LIST + 4, "LEAVE IT ALONE TO KEEP THE ROM.", COLOR_DIM, COLOR_BG);
+
+    // Timed as well as dismissible, so a boot nobody is watching is never held
+    // up. Nothing is written to flash to remember that it was seen: a sector
+    // erase at boot would mean parking Core 1 before the renderer has drawn a
+    // frame, and the launcher's flash writes happen with the machine stopped
+    // for a reason. main.c calls this once, so it cannot repeat within a
+    // session; it comes back on the next power-on only while it is still true,
+    // and restoring the built-in BIOS — or re-loading the ROM over this one —
+    // ends it for good. The launcher's header carries the same warning without
+    // interrupting anything.
+    absolute_time_t deadline = make_timeout_time_ms(NOTICE_TIMEOUT_MS);
+    int shown = -1;
+    for (;;) {
+        int64_t left_us = absolute_time_diff_us(get_absolute_time(), deadline);
+        if (left_us <= 0) break;
+
+        int left_s = (int) ((left_us + 999999) / 1000000);
+        if (left_s != shown) {
+            shown = left_s;
+            char countdown[8];
+            snprintf(countdown, sizeof(countdown), "%dS", left_s);
+            draw_bar(ROW_KEYS, "PRESS ANY KEY TO CONTINUE", countdown);
+            lcd_present();
+        }
+
+        // ~16ms of I2C per call, which is all the pacing this loop needs.
+        if (poll_key() != KEY_NONE) break;
+    }
 
     video_render_resume();
 }
