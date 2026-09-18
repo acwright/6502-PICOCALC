@@ -44,15 +44,23 @@ off waits on the link instead of being lost on the wire, which only matters for
 the few hundred cycles between reset and the BIOS's `InitSC`. Nothing in the
 BIOS or BASIC depends on any of them.
 
-The ACIA is otherwise the Rockwell R6551 exactly, down to the parts of it that
-firmware can hang on: DSR and DCD are active low and both read 0 for the
-permanently connected, permanently ready peer on the other end of the USB
-console and the side header; clearing DTR (command bit 0) turns the receiver,
-the transmitter and the interrupts off; and a TIC of `00` (command bits 3-2)
-raises RTS *and* stops the transmitter, so a byte written then sits in the
-transmit register with TDRE clear until RTS comes back down. That last one was
-proved on the bench against a real R6551, and the embedded BIOS v1.6 below is
-the reissue that copes with it.
+The ACIA sits on the standard Serial Card with its `CTS EN` jumper at ground,
+as every board is built: CTS, DCD and DSR are all tied low. Here that is the
+only honest model, not just a default, because neither the USB console nor the
+side header carries RTS or CTS wires, so nothing on the other end could drive
+those lines. So CTS never stops the transmitter and DCD never stops the
+receiver. There is no card picker, no jumper setting and none of the Serial
+Card Pro's lines.
+
+It is otherwise the Rockwell R6551 exactly, down to the parts of it that
+firmware can hang on: DSR and DCD are active low and both read 0; clearing DTR
+(command bit 0) turns the receiver, the transmitter and the interrupts off; and
+a TIC of `00` (command bits 3-2) raises RTS *and* stops the transmitter, so a
+byte written then sits in the transmit register with TDRE clear until RTS comes
+back down. That last one was proved on the bench against a real R6551, and the
+embedded BIOS v1.6 below is the reissue that copes with it. Receiver echo mode
+(command bit 4) sends each byte back out of both links, as it does for any byte
+the machine sends. Before v1.0.5 the echo went to the USB console only.
 
 The embedded ROM is BIOS **v1.6**, the last 1.x release. The PicoCalc is a
 TMS9918A machine and stays on the 1.x line, so this is the BIOS it keeps. 1.6

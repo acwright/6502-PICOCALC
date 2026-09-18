@@ -7,6 +7,33 @@
 #include "pico.h"
 #include "pico/stdio.h"
 
+// The card modelled is the standard Serial Card with its `CTS EN` jumper at
+// ground, as every board is built (6502-COB `09988ca`). On that card DCDB and
+// DSRB are tied to ground and DTRB is not connected, so all three of the
+// R6551's modem inputs are permanently low — asserted:
+//
+// - CTSB low never gates the transmitter, so there is no CTS here at all. A
+//   variable for a pin soldered to ground would only be dead code to drift.
+// - DCDB low never gates the receiver, so DTR alone does (receiver_enabled()).
+// - DSRB and DCDB read 0 in the status register, and never change, so the
+//   chip's interrupt on a modem-line change can never fire either.
+// - DTRB reaching nothing on the card does not stop command bit 0 gating the
+//   receiver, the transmitter and the interrupts inside the chip; that is
+//   modelled, and is not a mistake.
+//
+// Here that is not only the chosen card but the only honest one. The ACIA is
+// bridged to USB CDC and the side-header UART, and neither carries an RTS or
+// CTS wire, so there is no far end that could drive a line if a jumper were
+// moved to the cable. No card picker, no jumpers, and none of the Serial Card
+// Pro's lines.
+//
+// With every line at ground this agrees with the reference model,
+// 6502-EMULATOR's src/core/IO/ACIA.ts and SerialCard.ts, in all but the places
+// commented below: a byte that arrives while the receiver is off waits on the
+// link instead of being lost (serial_tick()), an overrun can happen here, from
+// the UART's own flag, where the reference has no line timing to overrun, and
+// an echo can be lost on the side header if its queue is full.
+
 // R65C51 (6551 ACIA) register bits — see BIOS.inc for the authoritative
 // layout this must match (SC_DATA/SC_RESET/SC_STATUS/SC_CMD/SC_CTRL).
 #define SC_CMD_DTR      0x01 // data terminal ready; clear turns the card off
@@ -109,14 +136,14 @@ static bool queue_full(void) {
 // A ROM loaded from the SD card that raises RTS and then transmits will hang
 // here, exactly as it hangs on a real board; that is the fidelity, not a bug.
 //
-// CTSB would disable the transmitter too, but every AC6502 serial card ties it
-// low or to the cable's CTS, and there is no CTS on either link here.
+// CTSB high would disable the transmitter too, but it is at ground on the card
+// modelled here (see the top of this file), so it never does.
 static inline bool transmitter_enabled(void) {
     return (cmd & SC_CMD_DTR) && (cmd & SC_CMD_TIC);
 }
 
 // Whether the receiver is running: DTR set, and DCDB low, which it always is
-// here (see serial_read's status case).
+// on this card (see the top of this file).
 static inline bool receiver_enabled(void) {
     return (cmd & SC_CMD_DTR) != 0;
 }
@@ -197,11 +224,8 @@ uint8_t serial_read(uint16_t addr) {
             return rx;
         case 1: // status register
             // Bits 6 and 5 are the levels on the DSRB and DCDB pins, and both
-            // are active low: 0 means ready / carrier present. Every AC6502
-            // serial card ties them low, or takes them from a cable whose far
-            // end is a host with its port open. There is no modem on either
-            // end of the USB console or the side header, and the peer is
-            // permanently connected and permanently ready, so both read 0.
+            // are active low: 0 means ready / carrier present. The standard
+            // Serial Card ties both pins to ground, so both always read 0.
             s = (uint8_t) (status & ~(SC_STATUS_DCD | SC_STATUS_DSR));
             // Reading clears the interrupt flag and nothing else; the byte
             // returned above is the state from before the clear.
@@ -290,7 +314,19 @@ uint8_t __not_in_flash_func(serial_tick)(void) {
                 if (c != PICO_ERROR_TIMEOUT) {
                     rx = (uint8_t) c;
                     status |= SC_STATUS_RDRF;
+                    // Echo mode retransmits the byte on TxD without going
+                    // through the transmit register, so TIC 00 does not stop
+                    // it; CTSB high would, but it is at ground. TxD is both
+                    // links here, as for any byte the machine sends, so the
+                    // echo goes out of both. On the chip the echo runs a half
+                    // bit behind the receiver and cannot back up; here the
+                    // USB console can outrun the UART, and an echo that finds
+                    // the queue full is lost on the side header only.
                     if (cmd & SC_CMD_REM) {
+                        if (!queue_full()) {
+                            tx_queue[tx_head] = rx;
+                            tx_head = queue_next(tx_head);
+                        }
                         putchar_raw((int) rx);
                     }
                     // Receiver interrupt: IRD (bit 1) clear enables it, and

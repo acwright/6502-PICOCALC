@@ -17,6 +17,10 @@
 // register asks for -- the BIOS's InitSC sets 19200 8-N-1 -- while USB CDC
 // ignores line settings, as USB serial does.
 //
+// The card modelled is the standard Serial Card with `CTS EN` at ground:
+// CTSB, DCDB and DSRB all permanently low. Neither link has RTS or CTS wires,
+// so no other model would be honest. See the top of serial.c.
+//
 // Debug output (printf) deliberately stays on USB CDC only, so the UART
 // carries nothing but the emulated machine's own bytes and binary transfers
 // come through clean.
