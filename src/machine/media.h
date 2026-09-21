@@ -28,22 +28,67 @@
 // the rest). Same origin and size as the built-in bios_rom[].
 #define MEDIA_ROM_SIZE  0x8000
 
-// A cartridge overlays $C000-$FFFF only — 16 KB, the Kernal and character set
-// below it staying visible (see the DOCS "Writing a cartridge" chapter).
-#define MEDIA_CART_SIZE 0x4000
+// What a flat cartridge overlays: $C000-$FFFF, 16 KB, the Kernal and character
+// set below it staying visible (see the DOCS "Writing a cartridge" chapter).
+// A .crt for that slot is 16 KB of cartridge, either on its own or as the top
+// half of a 32 KB EEPROM image — media_load_cart() takes the last 16 KB of
+// whatever it is given, which handles both.
+#define MEDIA_CART_WINDOW 0x4000
 
-// Longest file name remembered for the status line. FatFs is built without
-// long-name support, so names arrive as 8.3 and always fit.
-#define MEDIA_NAME_MAX 16
+// How much flash the cartridge region gets: a full megabyte, which is the
+// largest image 6502-VCS PLAN.md §1 defines, on both boards. The firmware is
+// well under 200 KB on either, so a uniform maximum is affordable and means
+// neither build refuses a cart the other takes.
+//
+// Reserving costs nothing unused: flash that is not written is not erased, and
+// media_load_cart() only ever erases what it writes.
+#define MEDIA_CART_MAX 0x100000
 
-// Bottom edge of this module's reserved flash region — the NVRAM sector, the
-// header sector, the ROM image and the cartridge image, all counted down from
-// the top of the chip (see media.c's layout comment). Anything else wanting a
-// sector of its own takes it from below this, rather than re-deriving the
-// chain and risking the two drifting apart (machine/settings.c does exactly
-// that).
-#define MEDIA_RESERVED_FLASH_BASE \
-    (PICO_FLASH_SIZE_BYTES - 2 * FLASH_SECTOR_SIZE - MEDIA_ROM_SIZE - MEDIA_CART_SIZE)
+// Longest file name remembered for the status line.
+#define MEDIA_NAME_MAX 32
+
+// Where machine/settings.c keeps its sector — **frozen**, and written out
+// rather than derived.
+//
+// It used to be one sector below everything this module reserves, which was
+// right for a fixed-size cartridge and is wrong the moment the cartridge region
+// grows: growing it drags the floor down and drags this with it, and every
+// existing user's settings are silently orphaned on the next boot. Reordering
+// the block and migrating the record is real work on persisted state, on a
+// board where it cannot be tested from a fresh flash — exactly the kind of risk
+// this port should not be generating.
+//
+// So it stops tracking anything. The arithmetic it used to be, kept here
+// because it is how these two numbers were arrived at and not because anything
+// still computes them:
+//
+//   PICO_FLASH_SIZE_BYTES
+//     - 2 * FLASH_SECTOR_SIZE   NVRAM sector, header sector
+//     - 0x8000                  ROM image
+//     - 0x4000                  the old flat cartridge slot
+//     - FLASH_SECTOR_SIZE       this sector
+//   = PICO_FLASH_SIZE_BYTES - 0xF000
+//
+//   Pico 1 (2 MB): 0x200000 - 0xF000 = 0x1F1000
+//   Pico 2 (4 MB): 0x400000 - 0xF000 = 0x3F1000
+#if PICO_FLASH_SIZE_BYTES == 0x400000
+#define MEDIA_SETTINGS_FLASH_OFFSET 0x3F1000u
+#elif PICO_FLASH_SIZE_BYTES == 0x200000
+#define MEDIA_SETTINGS_FLASH_OFFSET 0x1F1000u
+#else
+#error "no frozen settings offset for this flash size - see media.h"
+#endif
+
+// Bottom edge of everything reserved at the top of the chip — the NVRAM sector,
+// the header sector, the ROM image, sixteen stranded kilobytes where the old
+// flat cartridge slot was, the frozen settings sector, and the cartridge
+// region below it (see media.c's layout comment). Anything else wanting a
+// sector of its own takes it from below this, rather than re-deriving the chain
+// and risking the two drifting apart.
+//
+// Only the cartridge region grows, and it grows downward from a sector that
+// does not move. Nothing above it ever moves again.
+#define MEDIA_RESERVED_FLASH_BASE (MEDIA_SETTINGS_FLASH_OFFSET - MEDIA_CART_MAX)
 
 // Reads the header record left in flash by an earlier load, so a cartridge or
 // ROM chosen before the last power-off is still in place. Call once at boot,
@@ -54,9 +99,21 @@ void media_init(void);
 // NULL: the built-in BIOS unless a ROM has been loaded over it.
 const uint8_t *media_rom(void);
 
-// The 16 KB cartridge image, indexed from a $C000 origin, or NULL when the
-// slot is empty.
+// The cartridge image in flash, or NULL when the slot is empty.
+//
+// What it points at depends on what was loaded, which media_cart_size() says:
+// a flat cart is the 16 KB the machine sees, indexed from a $C000 origin, and
+// a banked one is the whole image, which only the mapper should be indexing.
 const uint8_t *media_cart(void);
+
+// The length of the file the cartridge was loaded from, which is what decides
+// how it is mapped (6502-VCS PLAN.md §1 rule 2) and what the launcher reports.
+// 0 when the slot is empty.
+//
+// Note that for a flat cart this is the length of the *file* and not of the
+// region media_cart() points at: a 32 KB EEPROM image is 32,768 bytes of file
+// and 16 KB of cartridge.
+uint32_t media_cart_size(void);
 
 // File names for the launcher's status lines; "" when nothing is loaded.
 const char *media_rom_name(void);
@@ -96,7 +153,18 @@ typedef void (*media_progress_fn)(uint32_t done, uint32_t total);
 // reset vector, which is only re-read on reset, as swapping a chip on real
 // hardware is only ever done with the power off.
 bool media_load_rom(const char *path, const char *name, media_progress_fn progress);
-bool media_load_cart(const char *path, const char *name, media_progress_fn progress);
+
+// Why a cartridge would not load, so the launcher can tell "this cart does not
+// fit" from "your SD card is bad" — which is worth the extra string.
+typedef enum {
+    MEDIA_CART_OK,
+    MEDIA_CART_ERR_OPEN,    // the file could not be opened or read
+    MEDIA_CART_ERR_TOO_BIG, // larger than this board reserves for a cartridge
+    MEDIA_CART_ERR_WRITE,   // flash would not take it; the slot is left empty
+} media_cart_result_t;
+
+media_cart_result_t media_load_cart(const char *path, const char *name,
+                                    media_progress_fn progress);
 
 // Empty the cartridge slot / go back to the built-in BIOS. Same reset rule.
 void media_eject_cart(void);

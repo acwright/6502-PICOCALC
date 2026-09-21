@@ -9,11 +9,15 @@
 #include "media.h"
 #include "ram_bank.h"
 
-// One sector, immediately below everything machine/media.c reserves (its
-// NVRAM sector, its header, and the ROM and cartridge images) — see
-// MEDIA_RESERVED_FLASH_BASE in media.h, which exists so this offset and
-// media.c's own layout cannot drift apart.
-#define SETTINGS_FLASH_OFFSET (MEDIA_RESERVED_FLASH_BASE - FLASH_SECTOR_SIZE)
+// One sector, at a **frozen** absolute offset — see MEDIA_SETTINGS_FLASH_OFFSET
+// in media.h, which is where the two literals and the arithmetic they came from
+// are written down.
+//
+// This used to be derived from machine/media.c's layout, one sector below
+// everything it reserved. It is not any more, and deliberately: the cartridge
+// region grew to a megabyte, and a derived offset would have moved with it and
+// orphaned every existing user's settings on the next boot.
+#define SETTINGS_FLASH_OFFSET MEDIA_SETTINGS_FLASH_OFFSET
 
 // 'S','E','T','1' — bumped if the record below ever changes shape, so an old
 // one is treated as absent (and the defaults apply) rather than misread.

@@ -444,12 +444,19 @@ static bool browse(folder_t which) {
             case FOLDER_PROGRAMS:
                 loaded = load_program(path, file_names[choice]);
                 break;
-            case FOLDER_CARTS:
+            case FOLDER_CARTS: {
                 show_progress(0, 1);
-                loaded = media_load_cart(path, file_names[choice], show_progress);
-                show_message_and_wait(loaded ? "CARTRIDGE IN THE SLOT - RESETTING"
-                                             : "COULD NOT LOAD CARTRIDGE");
+                media_cart_result_t result =
+                    media_load_cart(path, file_names[choice], show_progress);
+                loaded = result == MEDIA_CART_OK;
+                // "This cart does not fit" and "your SD card is bad" are
+                // different problems, and the difference is worth a string.
+                show_message_and_wait(
+                    result == MEDIA_CART_OK      ? "CARTRIDGE IN THE SLOT - RESETTING" :
+                    result == MEDIA_CART_ERR_TOO_BIG ? "CARTRIDGE TOO LARGE"
+                                                 : "COULD NOT LOAD CARTRIDGE");
                 break;
+            }
             case FOLDER_ROMS:
                 show_progress(0, 1);
                 loaded = media_load_rom(path, file_names[choice], show_progress);

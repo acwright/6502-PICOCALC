@@ -13,38 +13,63 @@
 //   last sector      NVRAM (machine/nvram.c owns it)
 //   -1 sector        this module's header record
 //   -32 KB           ROM image
-//   -16 KB           cartridge image
+//   -16 KB           unused — where the old flat cartridge slot was
+//   -1 sector        settings (machine/settings.c owns it), frozen where it is
+//   below            cartridge region, 1 MB
 //
-// 56 KB in total, against 2 MB on a Pico 1 and 4 MB on a Pico 2, with the
-// firmware image (well under 200 KB) growing up from the bottom.
+// Everything above the cartridge region is at the offset it has always been
+// at, and the cartridge region is the only thing that grows. The sixteen
+// stranded kilobytes are the price of that, and a fair one: the alternative was
+// reordering the block and migrating the settings record, which is real work on
+// persisted state, on a board where it cannot be tested from a fresh flash.
 //
-// MEDIA_RESERVED_FLASH_BASE (media.h) is this region's bottom edge, exposed
-// so another flash-backed store (machine/settings.c) can reserve its own
-// sector below it without re-deriving this chain.
+// MEDIA_RESERVED_FLASH_BASE (media.h) is the whole region's bottom edge. The
+// hazard the note there warns about is still real for anything else that wants
+// a sector: take it from below the base rather than re-deriving this chain.
 #define MEDIA_NVRAM_SECTOR  (PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE)
 #define MEDIA_HEADER_OFFSET (MEDIA_NVRAM_SECTOR - FLASH_SECTOR_SIZE)
 #define MEDIA_ROM_OFFSET    (MEDIA_HEADER_OFFSET - MEDIA_ROM_SIZE)
 #define MEDIA_CART_OFFSET   MEDIA_RESERVED_FLASH_BASE
 
-// 'M','E','D','2' — bumped if the record below ever changes shape, so an old
+// A firmware that grew into the cartridge region would corrupt a cart rather
+// than fail to link, so it fails to compile instead. Half a megabyte is many
+// times what this firmware has ever needed.
+_Static_assert(MEDIA_RESERVED_FLASH_BASE >= 512 * 1024,
+               "the reserved region leaves too little flash for the firmware");
+
+// The settings sector's offset is frozen at the value it used to be derived as,
+// and this is the derivation, kept solely to prove the literals in media.h are
+// that value and not a value near it. Getting it wrong by one sector orphans
+// every existing user's settings on their next boot, silently — which is the
+// one failure in this whole change that a board cannot be tested out of.
+_Static_assert(MEDIA_SETTINGS_FLASH_OFFSET ==
+                   PICO_FLASH_SIZE_BYTES - 2 * FLASH_SECTOR_SIZE - MEDIA_ROM_SIZE -
+                       MEDIA_CART_WINDOW - FLASH_SECTOR_SIZE,
+               "the frozen settings offset is not the offset it froze at");
+
+// 'M','E','D','3' — bumped if the record below ever changes shape, so an old
 // one is treated as "nothing loaded" rather than misread.
 //
-// The bump from 'M','E','D','1' (firmware up to v1.0.3) is doing a second job
-// as well as its first. A UF2 rewrites the firmware at the bottom of flash and
-// leaves this header and the ROM image at the top untouched, so a machine that
-// had ever loaded a ROM from the SD card carried on booting that ROM after an
-// update — which is how a v1.0.3 flash, whose whole point was the reissued
-// BIOS v1.6, came up on a BIOS v1.5 loaded months earlier. Treating a v1
-// record as having no ROM in the socket puts every such machine back on the
-// built-in BIOS, which is what flashing a firmware release means. The image
-// itself is left in flash exactly as media_restore_builtin_rom() leaves it,
-// and re-loading it is two keystrokes in the launcher.
+// The bump from 'M','E','D','2' is the cartridge region moving. The image used
+// to sit at the old slot's offset and now sits a megabyte lower, so a cart
+// loaded before this firmware cannot be where the header says it is, and
+// reading it as "nothing loaded" is the only honest answer. The user reloads it
+// from the SD card in a few seconds. The record also grows — longer names, and
+// the cartridge's size — and folding that into the same bump is why there is
+// one migration and not two.
 //
-// A cartridge is a different matter and is carried across (see media_init()):
-// it is not a BIOS, it is not what a firmware update replaces, and losing one
-// silently would be the same kind of surprise in the other direction.
-#define MEDIA_MAGIC    0x3244454Du
-#define MEDIA_MAGIC_V1 0x3144454Du
+// **The ROM image has not moved**: it is counted down from the top of the chip
+// and everything above the cartridge region is where it was. So a ROM override
+// is carried across (see media_init()), which is what a chip in a socket should
+// do across a firmware update. The bump from 'M','E','D','1' deliberately did
+// not carry one, because that update's whole point was a reissued BIOS; this
+// one's is not.
+//
+// A 'M','E','D','1' record is from firmware up to v1.0.3, whose ROM override
+// was already dropped by the last bump and whose cartridge has now moved. There
+// is nothing left in it to carry, so it is not read at all.
+#define MEDIA_MAGIC    0x3344454Du
+#define MEDIA_MAGIC_V2 0x3244454Du
 
 typedef struct {
     uint32_t magic;
@@ -56,17 +81,23 @@ typedef struct {
     // a later firmware can tell that it now ships a different one (see
     // media_rom_override_stale()). Meaningless unless rom_present.
     uint32_t builtin_checksum;
+    // The length of the file the cartridge was loaded from, which is what
+    // decides how it is mapped. Meaningless unless cart_present.
+    uint32_t cart_size;
 } media_header_t;
 
-// The v1 record, kept only so its cartridge can be migrated rather than
-// dropped. Identical to the above bar the trailing checksum.
+// The v2 record, kept only so a ROM override can be carried across rather than
+// dropped. Its names are shorter and it has no cart_size.
+#define MEDIA_NAME_MAX_V2 16
+
 typedef struct {
     uint32_t magic;
     uint32_t rom_present;
     uint32_t cart_present;
-    char rom_name[MEDIA_NAME_MAX];
-    char cart_name[MEDIA_NAME_MAX];
-} media_header_v1_t;
+    char rom_name[MEDIA_NAME_MAX_V2];
+    char cart_name[MEDIA_NAME_MAX_V2];
+    uint32_t builtin_checksum;
+} media_header_v2_t;
 
 #define MEDIA_HEADER_PROGRAM_SIZE \
     ((sizeof(media_header_t) + FLASH_PAGE_SIZE - 1) / FLASH_PAGE_SIZE * FLASH_PAGE_SIZE)
@@ -149,25 +180,14 @@ static void set_name(char *dest, const char *name) {
 // The shared shape of both loads: mark the slot empty *before* the image is
 // touched, so power lost part way through leaves a slot that is honestly
 // empty rather than a header pointing at half an image.
-static bool load_image(const char *path, const char *name, uint32_t offset, uint32_t size,
-                       uint32_t *present, char *stored_name, media_progress_fn progress) {
-    FIL file;
-    if (f_open(&file, path, FA_READ) != FR_OK) return false;
-
-    // A cartridge is mapped at the very top of the address space, so it is the
-    // *end* of the image that matters: a .crt is a 32 KB AT28C256 image whose
-    // first 16 KB is padding (see the 6502-CRT linker config, and 6502-DEV's
-    // loadCartPath, which skips the same 16 KB), while a bare 16 KB build has
-    // no padding to skip. Taking the last MEDIA_*_SIZE bytes handles both.
-    FSIZE_t file_size = f_size(&file);
-    uint32_t skip = (file_size > size) ? (uint32_t) (file_size - size) : 0;
-
+static bool load_image(FIL *file, const char *name, uint32_t offset, uint32_t size,
+                       uint32_t skip, uint32_t *present, char *stored_name,
+                       media_progress_fn progress) {
     *present = 0;
     set_name(stored_name, "");
     bool ok = write_header();
 
-    if (ok) ok = write_image(offset, size, &file, skip, progress);
-    f_close(&file);
+    if (ok) ok = write_image(offset, size, file, skip, progress);
     if (!ok) return false;
 
     *present = 1;
@@ -185,20 +205,21 @@ void media_init(void) {
         memcpy(&header, stored, sizeof(header));
         header.rom_name[MEDIA_NAME_MAX - 1] = '\0';
         header.cart_name[MEDIA_NAME_MAX - 1] = '\0';
-    } else if (stored->magic == MEDIA_MAGIC_V1) {
-        // Firmware up to v1.0.3. The ROM override goes (see MEDIA_MAGIC), the
-        // cartridge stays.
-        const media_header_v1_t *old = (const media_header_v1_t *) stored;
-        header.cart_present = old->cart_present;
-        memcpy(header.cart_name, old->cart_name, MEDIA_NAME_MAX);
-        header.cart_name[MEDIA_NAME_MAX - 1] = '\0';
+    } else if (stored->magic == MEDIA_MAGIC_V2) {
+        // The cartridge has moved out from under this record (see MEDIA_MAGIC),
+        // so it goes. The ROM image has not moved, so the override stays.
+        const media_header_v2_t *old = (const media_header_v2_t *) stored;
+        header.rom_present = old->rom_present;
+        header.builtin_checksum = old->builtin_checksum;
+        memcpy(header.rom_name, old->rom_name, MEDIA_NAME_MAX_V2);
+        header.rom_name[MEDIA_NAME_MAX_V2 - 1] = '\0';
         // Nothing is written back here on purpose. Rewriting the header would
         // mean erasing a sector at boot, with Core 1 already running the
         // renderer out of flash and nothing yet drawn on the panel — a flash
         // write is what the launcher does with the machine stopped, not
         // something to do unasked while the machine is coming up. Carrying the
         // migration in RAM costs nothing: it produces the same answer on every
-        // boot, and the next header the launcher writes is a v2 one.
+        // boot, and the next header the launcher writes is a v3 one.
     }
 
     // Whether the firmware has started shipping a different built-in BIOS than
@@ -215,6 +236,10 @@ const uint8_t *media_rom(void) {
 
 const uint8_t *media_cart(void) {
     return header.cart_present ? (const uint8_t *) (XIP_BASE + MEDIA_CART_OFFSET) : NULL;
+}
+
+uint32_t media_cart_size(void) {
+    return header.cart_present ? header.cart_size : 0;
 }
 
 const char *media_rom_name(void) {
@@ -262,22 +287,56 @@ const char *media_builtin_rom_version(void) {
 }
 
 bool media_load_rom(const char *path, const char *name, media_progress_fn progress) {
+    FIL file;
+    if (f_open(&file, path, FA_READ) != FR_OK) return false;
+
+    // A ROM image is the whole 32 KB the chip holds, so a longer file is read
+    // from its end — the same rule a cartridge follows, and for the same reason.
+    FSIZE_t file_size = f_size(&file);
+    uint32_t skip = (file_size > MEDIA_ROM_SIZE) ? (uint32_t) (file_size - MEDIA_ROM_SIZE) : 0;
+
     // Stamped before the load, not after, so it is in both headers load_image()
     // writes. This is what a later firmware compares against to know that the
     // BIOS it ships is no longer the one this ROM was chosen over.
     header.builtin_checksum = rom_checksum(bios_rom);
 
-    bool ok = load_image(path, name, MEDIA_ROM_OFFSET, MEDIA_ROM_SIZE,
+    bool ok = load_image(&file, name, MEDIA_ROM_OFFSET, MEDIA_ROM_SIZE, skip,
                          &header.rom_present, header.rom_name, progress);
+    f_close(&file);
+
     // Whatever the built-in BIOS is now, it is the one this choice was made
     // against — there is nothing left to warn about either way.
     rom_override_stale = false;
     return ok;
 }
 
-bool media_load_cart(const char *path, const char *name, media_progress_fn progress) {
-    return load_image(path, name, MEDIA_CART_OFFSET, MEDIA_CART_SIZE,
-                      &header.cart_present, header.cart_name, progress);
+media_cart_result_t media_load_cart(const char *path, const char *name,
+                                    media_progress_fn progress) {
+    FIL file;
+    if (f_open(&file, path, FA_READ) != FR_OK) return MEDIA_CART_ERR_OPEN;
+
+    uint32_t file_size = (uint32_t) f_size(&file);
+
+    if (file_size > MEDIA_CART_MAX) {
+        f_close(&file);
+        return MEDIA_CART_ERR_TOO_BIG;
+    }
+
+    // A flat cartridge is mapped at the very top of the address space, so it is
+    // the *end* of the image that matters: a .crt is a 32 KB AT28C256 image
+    // whose first 16 KB is padding (see the 6502-CRT linker config), while a
+    // bare 16 KB build has no padding to skip. Taking the last 16 KB handles
+    // both, and only the 16 KB the machine can see is written to flash.
+    uint32_t written = (file_size > MEDIA_CART_WINDOW) ? MEDIA_CART_WINDOW : file_size;
+    uint32_t skip = file_size - written;
+
+    header.cart_size = file_size;
+
+    bool ok = load_image(&file, name, MEDIA_CART_OFFSET, written, skip,
+                         &header.cart_present, header.cart_name, progress);
+    f_close(&file);
+
+    return ok ? MEDIA_CART_OK : MEDIA_CART_ERR_WRITE;
 }
 
 // Ejecting only clears the flag — the image is left in flash to be erased by
@@ -286,6 +345,7 @@ bool media_load_cart(const char *path, const char *name, media_progress_fn progr
 void media_eject_cart(void) {
     if (!header.cart_present) return;
     header.cart_present = 0;
+    header.cart_size = 0;
     set_name(header.cart_name, "");
     write_header();
 }
