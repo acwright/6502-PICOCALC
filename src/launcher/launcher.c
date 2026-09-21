@@ -488,9 +488,10 @@ static bool browse(folder_t which) {
                 // "This cart does not fit" and "your SD card is bad" are
                 // different problems, and the difference is worth a string.
                 show_message_and_wait(
-                    result == MEDIA_CART_OK      ? "CARTRIDGE IN THE SLOT - RESETTING" :
-                    result == MEDIA_CART_ERR_TOO_BIG ? "CARTRIDGE TOO LARGE"
-                                                 : "COULD NOT LOAD CARTRIDGE");
+                    result == MEDIA_CART_OK          ? "CARTRIDGE IN THE SLOT - RESETTING" :
+                    result == MEDIA_CART_ERR_TOO_BIG ? "CARTRIDGE TOO LARGE" :
+                    result == MEDIA_CART_ERR_SIZE    ? "NOT A CARTRIDGE IMAGE SIZE"
+                                                     : "COULD NOT LOAD CARTRIDGE");
                 break;
             }
             case FOLDER_ROMS:

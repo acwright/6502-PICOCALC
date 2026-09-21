@@ -7,6 +7,7 @@
 
 #include "ff.h"
 #include "bios_rom.h"
+#include "cart.h"
 
 // Flash layout, working down from the top of the chip:
 //
@@ -322,12 +323,23 @@ media_cart_result_t media_load_cart(const char *path, const char *name,
         return MEDIA_CART_ERR_TOO_BIG;
     }
 
-    // A flat cartridge is mapped at the very top of the address space, so it is
+    // The mapper is decided by the file's size and never by its name (cart.h,
+    // 6502-VCS PLAN.md §1 rule 2), so a length that is not one a cartridge
+    // comes in is refused rather than half-loaded.
+    if (!cart_size_valid(file_size)) {
+        f_close(&file);
+        return MEDIA_CART_ERR_SIZE;
+    }
+
+    // A banked image goes into flash whole, because the mapper indexes all of
+    // it. A flat one is mapped at the very top of the address space, so it is
     // the *end* of the image that matters: a .crt is a 32 KB AT28C256 image
     // whose first 16 KB is padding (see the 6502-CRT linker config), while a
     // bare 16 KB build has no padding to skip. Taking the last 16 KB handles
     // both, and only the 16 KB the machine can see is written to flash.
-    uint32_t written = (file_size > MEDIA_CART_WINDOW) ? MEDIA_CART_WINDOW : file_size;
+    uint32_t written = cart_size_banked(file_size)
+                           ? file_size
+                           : ((file_size > MEDIA_CART_WINDOW) ? MEDIA_CART_WINDOW : file_size);
     uint32_t skip = file_size - written;
 
     header.cart_size = file_size;

@@ -14,6 +14,7 @@
 #include "rtc.h"
 #include "ram_bank.h"
 #include "media.h"
+#include "cart.h"
 
 // Emulated memory map (PLAN.md §3): $0000-$7FFF RAM, $8000-$9FFF IO (eight
 // $400 slots), $A000-$FFFF ROM. The IO window is decoded in front of ROM, so
@@ -55,6 +56,11 @@ static VrEmu6502 *cpu;
 static const uint8_t *rom_image;
 static const uint8_t *cart_image;
 
+// Whether the image in the slot goes through machine/cart.c's mapper or
+// through the one-line index below. Cached here rather than asked of cart.c
+// per access, for the same reason the two pointers are.
+static bool cart_is_banked;
+
 // PLAN.md Phase 11 perf pass: caching the ROM in RAM (only the top 24KB,
 // $A000-$FFFF, is ever read -- $8000-$9FFF is always shadowed by the I/O
 // window above) was tried and measured on real RP2040 hardware short by
@@ -68,6 +74,15 @@ static const uint8_t *cart_image;
 // how slow that leaves boot.
 static void load_rom_image(void) {
     rom_image = media_rom();
+}
+
+// Whatever the launcher last put in the cartridge slot, and the mapper pointed
+// at it. cart_init() resets the bank register, which is what RESB does on the
+// board — the register's /MR is on it.
+static void load_cart_image(void) {
+    cart_image = media_cart();
+    cart_init(cart_image, media_cart_size());
+    cart_is_banked = cart_banked();
 }
 
 // RAM-resident (PLAN.md Phase 11 perf pass): every one of BASIC's own
@@ -104,7 +119,12 @@ static uint8_t __not_in_flash_func(bus_read)(uint16_t addr, bool isDbg) {
     // A cartridge in the slot answers for $C000-$FFFF, vectors included, so
     // the machine boots into it instead of BASIC; $A000-$BFFF stays ROM, which
     // is what leaves the Kernal and character set callable underneath it.
+    //
+    // A flat cart is the 16 KB the machine sees, indexed straight. A banked one
+    // goes through the mapper, which is where $C000-$DFFF becomes a window onto
+    // whichever bank the register selects (machine/cart.h).
     if (cart_image && addr >= CART_BASE) {
+        if (cart_is_banked) return cart_read(addr);
         return cart_image[addr - CART_BASE];
     }
     return rom_image[addr - MACHINE_ROM_BASE];
@@ -132,6 +152,13 @@ static void __not_in_flash_func(bus_write)(uint16_t addr, uint8_t val) {
         }
         return;
     }
+    // A banked cartridge answers writes as well as reads: $E000-$FFFF latches
+    // the bank register and $C000-$DFFF reaches flash. A flat cart has no WEB,
+    // and neither has ROM, so both stay read-only from the bus.
+    if (cart_is_banked && addr >= CART_BASE) {
+        cart_write(addr, val);
+        return;
+    }
     // ROM is read-only from the bus.
 }
 
@@ -141,7 +168,7 @@ void machine_init(void) {
     // machine_reset() below is what actually hands them to the bus.
     media_init();
     load_rom_image();
-    cart_image = media_cart();
+    load_cart_image();
 
     // One-time hardware setup for the cards that own a peripheral of their
     // own: the ACIA's side-header UART and the RTC's always-on timer plus
@@ -170,7 +197,7 @@ void machine_reset(bool cold_start) {
     // vector lives in both, and the CPU only reads it on reset — swapping
     // either on real hardware means powering the machine down first.
     load_rom_image();
-    cart_image = media_cart();
+    load_cart_image();
 
     serial_reset();
     video_reset();

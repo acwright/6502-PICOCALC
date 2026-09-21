@@ -24,6 +24,7 @@ add_executable(6502-picocalc
     machine/settings.c
     machine/ram_bank.c
     machine/media.c
+    machine/cart.c
     rom/bios_rom.c
 )
 

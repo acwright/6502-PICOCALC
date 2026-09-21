@@ -163,6 +163,7 @@ typedef enum {
     MEDIA_CART_OK,
     MEDIA_CART_ERR_OPEN,    // the file could not be opened or read
     MEDIA_CART_ERR_TOO_BIG, // larger than this board reserves for a cartridge
+    MEDIA_CART_ERR_SIZE,    // not a length a cartridge comes in (cart.h §1)
     MEDIA_CART_ERR_WRITE,   // flash would not take it; the slot is left empty
 } media_cart_result_t;
 
