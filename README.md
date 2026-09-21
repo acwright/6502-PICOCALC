@@ -188,8 +188,10 @@ higher disks are used, so all 256 are addressable without pre-filling 256 MB
 over SPI. Images can also be built on a desktop with
 [`cffs`](https://github.com/acwright/cffs).
 
-FatFs is built without long-name support, so files list under their 8.3 short
-names — `Space Invaders.bas` appears as `SPACEI~1.BAS` and loads fine that way.
+Files list under the names they were written with: FatFs is built with
+long-name support, so `Space Invaders.bas` appears as itself rather than as
+`SPACEI~1.BAS`. Names longer than 31 characters are truncated on screen, which
+no cartridge name comes close to.
 
 ## First boot
 

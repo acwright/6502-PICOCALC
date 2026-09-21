@@ -44,7 +44,10 @@
 // media_load_cart() only ever erases what it writes.
 #define MEDIA_CART_MAX 0x100000
 
-// Longest file name remembered for the status line.
+// Longest file name remembered for the status line, including the terminator.
+// Long enough for the whole of a cartridge name under 6502-VCS PLAN.md §1 —
+// `HelloWorldCart-VDP-512K.crt` is 27 characters — which is the point of
+// building FatFs with long names (ffconf.h FF_USE_LFN).
 #define MEDIA_NAME_MAX 32
 
 // Where machine/settings.c keeps its sector — **frozen**, and written out

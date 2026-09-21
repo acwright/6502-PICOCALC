@@ -188,16 +188,35 @@ static void show_message_and_wait(const char *text) {
 // File list
 // ---------------------------------------------------------------------
 
-// FatFs is built without long-name support (ffconf.h FF_USE_LFN 0), so what
-// comes back is the 8.3 short name — a file a desktop machine wrote as
-// "Space Invaders.bas" lists here as "SPACEI~1.BAS", and loads perfectly
-// well under that name. Folder names are matched case-insensitively against
-// the short name too, so the Teensy's mixed-case "Programs" opens as-is.
+// FatFs is built with long-name support (ffconf.h FF_USE_LFN), so what comes
+// back is the name as it was written: a file a desktop machine wrote as
+// "Space Invaders.bas" lists here under that name and not as "SPACEI~1.BAS".
+// That matters for cartridges, whose target suffix lives in the stem —
+// `Cart-512K.crt` has a nine-character stem, and the short name would have
+// thrown the "-512K" away, which is the entire point of the naming scheme
+// (6502-VCS PLAN.md §1).
+//
+// The names go in one pool rather than in a row each, because a row each is
+// what does not fit. A fixed 32-byte row times MAX_FILES is three kilobytes,
+// and a Pico 1 has about fifteen hundred bytes spare once the framebuffer, the
+// canvas, the machine's RAM, the two copies of VRAM and the expansion RAM card
+// are placed (ram_bank.h documents that budget, and it has already been fought
+// over once). Names are short and variable, so the pool holds four times as
+// many of them in the same space, and the pointer array below replaces the
+// second copy of the list the browser used to keep.
+//
+// Both caps are real: a folder with more than MAX_FILES files, or with more
+// name than the pool holds, lists what fits and says so. Nothing is truncated
+// — a name is stored whole or not at all, so what is on screen is always a
+// name that will open.
 #define MAX_FILES 96
-#define NAME_LEN  13
+#define NAME_POOL 1792
 
-static char file_names[MAX_FILES][NAME_LEN];
+static const char *file_names[MAX_FILES];
+static char name_pool[NAME_POOL];
+static uint16_t pool_used;
 static int file_count;
+static bool file_list_clipped;
 
 // Read into RAM a chunk at a time on the way to the machine's memory.
 static uint8_t copy_buffer[512];
@@ -206,6 +225,8 @@ static uint8_t copy_buffer[512];
 // sort because the list is short and it costs no extra memory.
 static FRESULT read_folder(const char *folder) {
     file_count = 0;
+    pool_used = 0;
+    file_list_clipped = false;
 
     DIR dir;
     FRESULT fr = f_opendir(&dir, folder);
@@ -216,15 +237,25 @@ static FRESULT read_folder(const char *folder) {
         fr = f_readdir(&dir, &fno);
         if (fr != FR_OK || fno.fname[0] == 0) break;
         if (fno.fname[0] == '.' || (fno.fattrib & (AM_DIR | AM_HID | AM_SYS))) continue;
-        if (file_count >= MAX_FILES) break;
 
+        size_t len = strlen(fno.fname) + 1;
+        if (file_count >= MAX_FILES || pool_used + len > NAME_POOL) {
+            file_list_clipped = true;
+            break;
+        }
+
+        char *name = &name_pool[pool_used];
+        memcpy(name, fno.fname, len);
+        pool_used += (uint16_t) len;
+
+        // Insertion sort over the pointers, which is what the pool buys: the
+        // names themselves never move.
         int at = file_count++;
-        while (at > 0 && strcmp(file_names[at - 1], fno.fname) > 0) {
-            memcpy(file_names[at], file_names[at - 1], NAME_LEN);
+        while (at > 0 && strcmp(file_names[at - 1], name) > 0) {
+            file_names[at] = file_names[at - 1];
             at--;
         }
-        strncpy(file_names[at], fno.fname, NAME_LEN - 1);
-        file_names[at][NAME_LEN - 1] = '\0';
+        file_names[at] = name;
     }
 
     f_closedir(&dir);
@@ -427,16 +458,21 @@ static bool browse(folder_t which) {
         return false;
     }
 
-    static const char *items[MAX_FILES];
-    for (int i = 0; i < file_count; i++) items[i] = file_names[i];
+    // More files, or more name, than there is room to hold. Said once, on the
+    // way in, rather than left for someone to notice a file is missing.
+    if (file_list_clipped) {
+        char line[COLS + 1];
+        snprintf(line, sizeof(line), "SHOWING THE FIRST %d FILES IN %s/", file_count, folder);
+        show_message_and_wait(line);
+    }
 
     int selected = 0, top = 0;
     for (;;) {
-        int choice = run_list(folder_title(which), items, file_count, &selected, &top,
+        int choice = run_list(folder_title(which), file_names, file_count, &selected, &top,
                               "ENTER LOAD   ESC BACK");
         if (choice < 0) return false;
 
-        char path[8 + NAME_LEN + 2];
+        char path[80];
         snprintf(path, sizeof(path), "%s/%s", folder, file_names[choice]);
 
         bool loaded = false;

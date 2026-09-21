@@ -1,8 +1,9 @@
 /*---------------------------------------------------------------------------/
 /  Configurations of FatFs Module
 /  Vendored unmodified from elm-chan FatFs R0.16 w/patch 2 (see PLAN.md
-/  Phase 2) except FF_FS_NORTC below. diskio.c is NOT the stock template;
-/  see src/fatfs/diskio.c for the sd/sd.h glue.
+/  Phase 2) except for four settings, each marked where it is set:
+/  FF_FS_NORTC, FF_USE_LFN, FF_MAX_LFN and FF_CODE_PAGE. diskio.c is NOT the
+/  stock template; see src/fatfs/diskio.c for the sd/sd.h glue.
 /---------------------------------------------------------------------------*/
 
 #define FFCONF_DEF	80386	/* Revision ID */
@@ -87,7 +88,11 @@
 / Locale and Namespace Configurations
 /---------------------------------------------------------------------------*/
 
-#define FF_CODE_PAGE	932
+/* 437 (US), not the stock 932: the machine's own character set is IBM CP437 —
+/  it is the font the BIOS carries and the launcher draws in — and with LFN
+/  enabled a DBCS code page would also compile tens of kilobytes of conversion
+/  table into ffunicode.c for a language nothing here speaks. */
+#define FF_CODE_PAGE	437
 /* This option specifies the OEM code page to be used on the target system.
 /  Incorrect code page setting can cause a file open failure.
 /
@@ -116,8 +121,16 @@
 */
 
 
-#define FF_USE_LFN		0
-#define FF_MAX_LFN		255
+/* 1, not the stock 0: the cartridge naming scheme (6502-VCS PLAN.md §1) puts
+/  the target in the stem, so `Cart-512K.crt` has a nine-character stem and
+/  comes back as `CART-5~1.CRT` without this — and the suffix, which is the
+/  whole point of the scheme, never reaches the screen or the .sav name.
+/
+/  63 rather than the recommended 255: the working buffer is (FF_MAX_LFN + 1)
+/  * 2 bytes of BSS, so this is 128 bytes, and 63 characters is far more than
+/  any cartridge name needs on a machine with a 52-column screen. */
+#define FF_USE_LFN		1
+#define FF_MAX_LFN		63
 /* The FF_USE_LFN switches the support for LFN (long file name).
 /
 /   0: Disable LFN. FF_MAX_LFN has no effect.

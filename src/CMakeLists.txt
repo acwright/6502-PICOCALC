@@ -5,6 +5,10 @@ add_executable(6502-picocalc
     launcher/launcher.c
     sd/sd.c
     fatfs/ff.c
+    # Needed by the long-name support ffconf.h now enables, and by nothing
+    # else. Vendored unmodified from elm-chan FatFs R0.16 — patches 1 and 2 are
+    # both to ff.c, so this file has nothing to apply.
+    fatfs/ffunicode.c
     fatfs/diskio.c
     cpu/vrEmu6502/vrEmu6502.c
     machine/machine.c
