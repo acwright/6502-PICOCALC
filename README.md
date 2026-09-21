@@ -29,6 +29,7 @@ synthesises the SID.
 | **CPU** | W65C02S via [vrEmu6502](https://github.com/visrealm/vrEmu6502), full opcode set, IRQ / NMI |
 | **RAM** | 32 KB system RAM + banked expansion (see [Pico 1 vs Pico 2](#pico-1-vs-pico-2)) |
 | **ROM** | 32 KB BIOS **v1.6** in flash, replaceable from the SD card (see [The ROM socket](#the-rom-socket)) |
+| **Cartridge** | 16 KB flat, or 128 KB – 1 MB banked (Flash Cart), held in flash (see [Flash carts](#flash-carts)) |
 | **Video** | TMS9918A VDP, 16 KB VRAM — rendered to the PicoCalc's 320×320 LCD |
 | **Audio** | MOS 6581 SID — synthesised to the PWM speaker pins |
 | **Serial** | 6551 ACIA — bridged to USB CDC *and* the side-header UART, both live at once |
@@ -36,13 +37,16 @@ synthesises the SID.
 | **RTC / NVRAM** | DS1511Y+ — clock plus 256 B of NVRAM, kept in flash, with burst mode for the BIOS's save slots |
 | **GPIO** | 6522 VIA — keyboard on port B, fed from the PicoCalc's I2C keyboard, plus a joystick on each port |
 
-Three places knowingly differ from the reference: the VDP status register's
+Four places knowingly differ from the reference: the VDP status register's
 fifth-sprite and collision bits always read 0 (sprites are rasterised on the
 other core); the emulated CPU is not paced to a fixed clock rate — it runs as
-fast as the board manages; and a byte that arrives while the ACIA's receiver is
+fast as the board manages; a byte that arrives while the ACIA's receiver is
 off waits on the link instead of being lost on the wire, which only matters for
-the few hundred cycles between reset and the BIOS's `InitSC`. Nothing in the
-BIOS or BASIC depends on any of them.
+the few hundred cycles between reset and the BIOS's `InitSC`; and a flash
+cartridge's program and erase complete instantly, which is a consequence of the
+second one and is worth reading [Flash carts](#flash-carts) about if you are
+writing a cartridge that programs itself. Nothing in the BIOS or BASIC depends
+on any of them.
 
 The ACIA sits on the standard Serial Card with its `CTS EN` jumper at ground,
 as every board is built: CTS, DCD and DSR are all tied low. Here that is the
@@ -119,6 +123,62 @@ The serial console names the ROM at boot too:
 ROM: built-in BIOS v1.6
 ```
 
+### Flash carts
+
+A cartridge image in `/Carts` is one of six sizes, and **the size decides how it
+is mapped** — never the name. Up to 32 KB is the flat cartridge this machine has
+always taken: 16 KB of code at `$C000–$FFFF`, either on its own or as the top
+half of a 32 KB EEPROM image. 128 KB, 256 KB, 512 KB and 1 MB are a **Flash
+Cart**, mapped by a bank register. Any other length is refused, because it is
+not an image of a chip.
+
+The name is a label. `Game-512K.crt` that is 262,144 bytes long loads as a
+256 KB cart, and the launcher says so rather than refusing it.
+
+A banked cart is one or two SST39SF0x0 flash chips behind an 8-bit register:
+
+- `$C000–$DFFF` is an 8 KB **window** onto whichever bank the register selects.
+- `$E000–$FFFF` is the **fixed region** — always the primary chip's last 8 KB,
+  whatever the register holds. The reset and interrupt vectors live there, so
+  they can never be banked out from under the CPU.
+- A write anywhere in `$E000–$FFFF` latches the register and reaches no flash.
+  A reset clears it, because the register's `/MR` is on `RESB`.
+- A write to `$C000–$DFFF` is a flash write, which does something only as part
+  of a JEDEC command sequence — so a cartridge can program and erase itself,
+  exactly as it does on the board.
+
+The image lives in the Pico's own flash, in a megabyte reserved for it, and is
+read straight through XIP — the same cost the BIOS ROM pays. **That flash is the
+cartridge's chip in this metaphor**, so a save a game writes is already
+non-volatile: it survives a power cycle with no machinery at all, and the `.crt`
+on the SD card is never written. Re-loading the cartridge from the SD card is
+how a save is thrown away.
+
+`Carts/<name>.sav` exists to carry a save somewhere else — to the desktop
+emulator, or onto a real chip with `6502-flash merge`. It is written on eject,
+and from **Save cart data** in the launcher. Its header carries the `.crt`'s size
+and CRC-32, so a save can never be laid over a different build of a cartridge:
+rebuild the cart and the launcher reports the save as belonging to another build,
+starts the cart without it, and leaves the file on the card.
+
+The record of *which* sectors to write out lives in RAM, so a power cycle forgets
+it. The save itself does not go anywhere — it is in flash, and the cartridge
+still reads it — but writing a sidecar is something to do in the session that
+made the save.
+
+**The knowing difference:** program and erase complete instantly here. The
+emulated CPU is not paced to a fixed clock, so there is no cycle count to hang a
+busy window on. Both standard polling loops still terminate, so ordinary save
+code works — but a routine that programs the chip while *running from it* works
+here and hangs on real hardware, where a busy chip answers every read with status
+bits, the vectors included. The desktop emulator models the busy window and is
+where that bug is meant to be caught.
+
+The naming scheme, the mapper, the command set and the `.sav` container are
+specified in 6502-VCS `PLAN.md` §§1–4, which three emulators and one programmer
+all implement. The tests in [`test/cart/`](test/cart/README.md) check this one
+against that rollout's shared fixture, on a desktop.
+
 ---
 
 ## Requirements
@@ -177,7 +237,8 @@ The launcher expects three folders, and offers to create any that are missing:
 
 ```
 /Programs     .bas / .prg program images, loaded to $0800
-/Carts        16 KB or 32 KB cartridge images, mapped at $C000
+/Carts        cartridge images (.crt) and the saves they write beside them
+              (.sav) — see Flash carts
 /ROMs         32 KB BIOS replacements (see The ROM socket)
 /CF.IMG       the emulated CompactFlash card (created on first boot)
 ```
@@ -258,6 +319,10 @@ Both are supported and boot the same machine. The differences come from SRAM:
 | SRAM | 264 KB | 520 KB |
 | Expansion RAM (IO 1) | 16 banks / 16 KB | 256 banks / 256 KB |
 | Expansion RAM (IO 2) | absent | absent |
+| Cartridge region | 1 MB reserved | 1 MB reserved |
+
+Both boards reserve the same megabyte for a cartridge and both take every size,
+so a cart that runs on one runs on the other.
 
 The BIOS probes every slot, so both boot correctly — only the amount of paged
 RAM differs, and `MEM` reports what answered. BASIC itself only ever uses
