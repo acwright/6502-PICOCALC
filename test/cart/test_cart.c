@@ -108,6 +108,15 @@ int main(void) {
     check(!cart_size_valid(0x30000), "and neither is one between two banked sizes");
     check(strcmp(cart_size_name(CART_SIZE_512K), "512K") == 0, "512K is named");
 
+    // Rule 3: the name must agree with the size, and a disagreement is a
+    // warning and never a refusal.
+    check(cart_name_agrees("Cart-512K.crt", CART_SIZE_512K), "a name that agrees");
+    check(cart_name_agrees("Cart-VDP-1M.crt", CART_SIZE_1M), "-VDP comes before the target");
+    check(cart_name_agrees("Cart.crt", CART_SIZE_FLAT), "no suffix claims the flat cart");
+    check(!cart_name_agrees("Cart-512K.crt", CART_SIZE_256K), "a name that does not");
+    check(!cart_name_agrees("Cart.crt", CART_SIZE_128K), "a banked image under a flat name");
+    check(cart_name_agrees("whatever.bin", 0x9000), "an illegal size is someone else's error");
+
     printf("\xc2\xa7""2 the mapper contract\n");
     cart_init(flash, size);
     check(cart_banked(), "the fixture is banked");

@@ -3,6 +3,7 @@
 #include <stddef.h>
 
 #include <string.h>
+#include <strings.h> // strncasecmp
 
 #include "pico.h" // __not_in_flash_func
 
@@ -85,6 +86,35 @@ const char *cart_size_name(uint32_t size) {
     if (size > 0x4000u && size <= CART_SIZE_FLAT) return "32K";
     if (size > 0) return "16K";
     return "?";
+}
+
+bool cart_name_agrees(const char *name, uint32_t size) {
+    if (!cart_size_valid(size)) return true;
+
+    // "-VDP" comes first and the target is always last (§1), so only the tail
+    // of the stem is examined. A name with no suffix claims the flat cart,
+    // which is what every cartridge was called before the scheme existed.
+    size_t len = strlen(name);
+    const char *dot = NULL;
+    for (const char *p = name; *p; p++) {
+        if (*p == '.') dot = p;
+    }
+    size_t stem = dot ? (size_t) (dot - name) : len;
+
+    static const char *const suffixes[] = { "-128K", "-256K", "-512K", "-1M" };
+    static const char *const targets[]  = { "128K", "256K", "512K", "1M" };
+
+    const char *claimed = NULL;
+    for (unsigned i = 0; i < 4 && !claimed; i++) {
+        size_t n = strlen(suffixes[i]);
+        if (stem < n) continue;
+        if (strncasecmp(name + stem - n, suffixes[i], n) == 0) claimed = targets[i];
+    }
+
+    // No suffix: the name claims a flat cart, and a flat image agrees with it.
+    if (!claimed) return !cart_size_banked(size);
+
+    return strcmp(claimed, cart_size_name(size)) == 0;
 }
 
 void cart_init(const uint8_t *image, uint32_t size) {

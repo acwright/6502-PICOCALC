@@ -52,6 +52,16 @@ bool cart_size_banked(uint32_t size);
 // status line. "?" for a length that is not a cartridge at all.
 const char *cart_size_name(uint32_t size);
 
+// Rule 3 of the naming scheme: the name must agree with the size, and a
+// disagreement is a **warning, not an error**. `Foo-512K.crt` that is 262,144
+// bytes long loads as a 256K cart and says so — the name is for whoever is
+// reading a file list, and the bytes are for the machine.
+//
+// True when they agree, when the name carries no target suffix and the image
+// is a flat one, or when the size is not a legal one at all (which is a worse
+// error, and someone else's to report).
+bool cart_name_agrees(const char *name, uint32_t size);
+
 // Point the mapper at an image in flash and reset it. `size` is the length of
 // the file it came from; a flat size leaves cart_banked() false and nothing
 // here is used.

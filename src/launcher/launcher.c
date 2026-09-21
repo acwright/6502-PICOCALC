@@ -11,6 +11,7 @@
 #include "lcd/lcd.h"
 #include "machine/machine.h"
 #include "machine/media.h"
+#include "machine/cart.h"
 #include "machine/ram_bank.h"
 #include "machine/settings.h"
 #include "machine/video_render.h"
@@ -372,7 +373,14 @@ static void draw_header(void) {
     // place to ask, and the bare words "BUILT-IN BIOS" never answered it.
     snprintf(line, sizeof(line), "ROM:  %s", rom[0] ? rom : builtin);
     draw_text(1, ROW_ROM, line, COLOR_DIM, COLOR_BG);
-    snprintf(line, sizeof(line), "CART: %s", cart[0] ? cart : "NONE");
+    // With its size, because on this machine that is the one thing about a
+    // cartridge you cannot tell by looking at it — and the name may not say,
+    // or may say wrong (§1 rule 3).
+    if (cart[0]) {
+        snprintf(line, sizeof(line), "CART: %s (%s)", cart, cart_size_name(media_cart_size()));
+    } else {
+        snprintf(line, sizeof(line), "CART: NONE");
+    }
     draw_text(1, ROW_CART, line, COLOR_DIM, COLOR_BG);
 
     // Standing warning, for as long as it is true: the boot notice is shown
@@ -485,13 +493,42 @@ static bool browse(folder_t which) {
                 media_cart_result_t result =
                     media_load_cart(path, file_names[choice], show_progress);
                 loaded = result == MEDIA_CART_OK;
-                // "This cart does not fit" and "your SD card is bad" are
-                // different problems, and the difference is worth a string.
-                show_message_and_wait(
-                    result == MEDIA_CART_OK          ? "CARTRIDGE IN THE SLOT - RESETTING" :
-                    result == MEDIA_CART_ERR_TOO_BIG ? "CARTRIDGE TOO LARGE" :
-                    result == MEDIA_CART_ERR_SIZE    ? "NOT A CARTRIDGE IMAGE SIZE"
-                                                     : "COULD NOT LOAD CARTRIDGE");
+
+                if (!loaded) {
+                    // "This cart does not fit" and "your SD card is bad" are
+                    // different problems, and the difference is worth a string.
+                    show_message_and_wait(
+                        result == MEDIA_CART_ERR_TOO_BIG ? "CARTRIDGE TOO LARGE" :
+                        result == MEDIA_CART_ERR_SIZE    ? "NOT A CARTRIDGE IMAGE SIZE"
+                                                         : "COULD NOT LOAD CARTRIDGE");
+                    break;
+                }
+
+                char line[COLS + 1];
+
+                // Rule 3: the bytes decide and the name is a label, so a
+                // disagreement is said out loud and is never a reason to refuse
+                // the file.
+                if (!cart_name_agrees(file_names[choice], media_cart_size())) {
+                    snprintf(line, sizeof(line), "NAME SAYS OTHERWISE - THIS IS A %s CART",
+                             cart_size_name(media_cart_size()));
+                    show_message_and_wait(line);
+                }
+
+                switch (media_cart_save_state()) {
+                    case MEDIA_SAVE_APPLIED:
+                        show_message_and_wait("SAVE DATA APPLIED - RESETTING");
+                        break;
+                    case MEDIA_SAVE_MISMATCH:
+                        show_message_and_wait("SAVE IS FOR ANOTHER BUILD - LEFT ON THE CARD");
+                        break;
+                    case MEDIA_SAVE_BAD:
+                        show_message_and_wait("SAVE DATA UNREADABLE - LEFT ON THE CARD");
+                        break;
+                    default:
+                        show_message_and_wait("CARTRIDGE IN THE SLOT - RESETTING");
+                        break;
+                }
                 break;
             }
             case FOLDER_ROMS:
@@ -667,6 +704,7 @@ typedef enum {
     ITEM_PROGRAMS,
     ITEM_CARTS,
     ITEM_ROMS,
+    ITEM_SAVE_CART,
     ITEM_EJECT_CART,
     ITEM_BUILTIN_ROM,
     ITEM_SETTINGS,
@@ -692,14 +730,20 @@ void launcher_run(void) {
     for (;;) {
         draw_header();
 
-        item_t ids[9];
-        const char *labels[9];
+        item_t ids[10];
+        const char *labels[10];
         int count = 0;
 
         ids[count] = ITEM_PROGRAMS;    labels[count++] = "LOAD PROGRAM";
         ids[count] = ITEM_CARTS;       labels[count++] = "LOAD CARTRIDGE";
         ids[count] = ITEM_ROMS;        labels[count++] = "LOAD ROM";
         if (media_cart_name()[0]) {
+            // Only when there is something to write. Ejecting writes it too,
+            // so this is for taking a save to the desktop without giving the
+            // cartridge up.
+            if (cart_dirty()) {
+                ids[count] = ITEM_SAVE_CART; labels[count++] = "SAVE CART DATA";
+            }
             ids[count] = ITEM_EJECT_CART;  labels[count++] = "EJECT CARTRIDGE";
         }
         if (media_rom_name()[0]) {
@@ -726,6 +770,12 @@ void launcher_run(void) {
                 break;
             case ITEM_ROMS:
                 loaded = browse(FOLDER_ROMS);
+                break;
+            case ITEM_SAVE_CART:
+                show_status("SAVING...");
+                show_message_and_wait(media_save_cart()
+                                          ? "SAVE DATA WRITTEN TO THE SD CARD"
+                                          : "COULD NOT WRITE THE SAVE");
                 break;
             case ITEM_EJECT_CART:
                 // The save goes to the SD card on the way out, so ejecting is
