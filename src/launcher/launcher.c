@@ -728,9 +728,16 @@ void launcher_run(void) {
                 loaded = browse(FOLDER_ROMS);
                 break;
             case ITEM_EJECT_CART:
+                // The save goes to the SD card on the way out, so ejecting is
+                // not how a cartridge loses what it wrote. An eject that could
+                // not write it leaves the cartridge in the slot rather than
+                // taking the save with it.
                 show_status("EJECTING...");
-                media_eject_cart();
-                loaded = true;
+                if (media_eject_cart()) {
+                    loaded = true;
+                } else {
+                    show_message_and_wait("COULD NOT WRITE THE SAVE - CARTRIDGE LEFT IN");
+                }
                 break;
             case ITEM_BUILTIN_ROM:
                 show_status("RESTORING...");

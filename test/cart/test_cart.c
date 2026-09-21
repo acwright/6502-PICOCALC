@@ -207,6 +207,17 @@ int main(void) {
     check_byte(cart_read(0xD010), 0x0E & 0x0F, "still reads back from flash");
     check_byte(flash[29 * CART_SECTOR_SIZE + 0x10], 0x0E & 0x0F, "and it is really there");
 
+    // A flush gives the staging buffer back. machine/media.c stages images
+    // through the same 4 KB, so a sector still claimed after a flush would have
+    // the read path serving whatever media.c put there next — which is the
+    // invariant the shared buffer rests on.
+    program_byte(0x03, 0xC800, 0x00);
+    cart_flush();
+    memset(stage, 0x5A, sizeof(stage)); // media.c, staging something else
+    cart_write(0xE000, 0x03);
+    check_byte(cart_read(0xC800), 0x00, "the programmed byte, now from flash");
+    check_byte(cart_read(0xC810), 0x03, "and its sector is not the staging buffer");
+
     // Sector erase: 4 KB to $FF on a 4 KB boundary.
     erase_sector(0x0E, 0xC010);
     cart_write(0xE000, 0x0E);

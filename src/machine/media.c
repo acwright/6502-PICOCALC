@@ -77,18 +77,25 @@ typedef struct {
     uint32_t rom_present;
     uint32_t cart_present;
     char rom_name[MEDIA_NAME_MAX];
-    char cart_name[MEDIA_NAME_MAX];
+    // The cartridge's **path** on the SD card, not just its name. The save
+    // sidecar lives beside the .crt and has to be findable after a power cycle,
+    // when the cartridge is still in the slot and nothing else remembers where
+    // it came from. media_cart_name() is the last component of this.
+    char cart_path[MEDIA_PATH_MAX];
     // What the built-in BIOS hashed to when this ROM was put in the socket, so
     // a later firmware can tell that it now ships a different one (see
     // media_rom_override_stale()). Meaningless unless rom_present.
     uint32_t builtin_checksum;
     // The length of the file the cartridge was loaded from, which is what
-    // decides how it is mapped. Meaningless unless cart_present.
+    // decides how it is mapped, and the CRC-32 of that file, which is what a
+    // .sav carries to say which build of the cart it belongs to. Both
+    // meaningless unless cart_present.
     uint32_t cart_size;
+    uint32_t cart_crc;
 } media_header_t;
 
 // The v2 record, kept only so a ROM override can be carried across rather than
-// dropped. Its names are shorter and it has no cart_size.
+// dropped. Its names are shorter, and it has no cartridge path, size or CRC.
 #define MEDIA_NAME_MAX_V2 16
 
 typedef struct {
@@ -131,6 +138,53 @@ static uint32_t rom_checksum(const uint8_t *rom) {
 // media.h for why there is one of these and not two, and for the rule that
 // keeps the two uses out of each other's way.
 static uint8_t stage[FLASH_SECTOR_SIZE];
+
+// What was beside the .crt when the cartridge was loaded. Worked out once, in
+// media_load_cart(), and then just reported — the cartridge may have written
+// over those sectors since.
+static media_save_state_t save_state;
+
+// CRC-32, IEEE, the zlib polynomial — the one the .sav container names (§4).
+// Table-free: 1 KB of table is more than this firmware should spend on a
+// checksum it computes once per cartridge load.
+static uint32_t crc32_update(uint32_t crc, const uint8_t *data, uint32_t len) {
+    crc = ~crc;
+    while (len--) {
+        crc ^= *data++;
+        for (uint8_t k = 0; k < 8; k++) {
+            crc = (crc >> 1) ^ (0xEDB88320u & (uint32_t) (-(int32_t) (crc & 1)));
+        }
+    }
+    return ~crc;
+}
+
+static uint32_t read_le32(const uint8_t *at) {
+    return (uint32_t) at[0] | ((uint32_t) at[1] << 8) |
+           ((uint32_t) at[2] << 16) | ((uint32_t) at[3] << 24);
+}
+
+static void write_le32(uint8_t *at, uint32_t value) {
+    at[0] = (uint8_t) value;
+    at[1] = (uint8_t) (value >> 8);
+    at[2] = (uint8_t) (value >> 16);
+    at[3] = (uint8_t) (value >> 24);
+}
+
+// Carts/Cart-512K.crt -> Carts/Cart-512K.sav, beside it. The extension is
+// replaced rather than appended, so the pair reads as a pair in a listing.
+static void sidecar_path(char *out, size_t len) {
+    strncpy(out, header.cart_path, len - 1);
+    out[len - 1] = '\0';
+
+    char *dot = NULL;
+    for (char *p = out; *p; p++) {
+        if (*p == '/') dot = NULL;
+        else if (*p == '.') dot = p;
+    }
+    if (dot) *dot = '\0';
+
+    strncat(out, ".sav", len - strlen(out) - 1);
+}
 
 // The chip's erase unit and the Pico's are the same 4 KB, which is what lets
 // one emulated sector be one real one.
@@ -177,23 +231,27 @@ static bool write_header(void) {
 // Copies `size` bytes of an already-open file into flash at `offset`, having
 // first skipped `skip` bytes of it. A file shorter than the region leaves the
 // rest reading as erased flash ($FF), the same as an EEPROM nobody programmed.
+// `crc_out`, when given, collects a CRC-32 of the bytes actually read — the
+// file's own checksum, not the 0xFF the last partial sector is padded with.
+// This is the one moment the file and the image in flash are the same bytes,
+// so it is where the cartridge's identity is taken.
 static bool write_image(uint32_t offset, uint32_t size, FIL *file, uint32_t skip,
-                        media_progress_fn progress) {
+                        media_progress_fn progress, uint32_t *crc_out) {
     if (f_lseek(file, skip) != FR_OK) return false;
+
+    uint32_t crc = 0;
 
     for (uint32_t done = 0; done < size; done += FLASH_SECTOR_SIZE) {
         memset(stage, 0xFF, sizeof(stage));
         UINT got = 0;
         if (f_read(file, stage, FLASH_SECTOR_SIZE, &got) != FR_OK) return false;
+        if (crc_out) crc = crc32_update(crc, stage, (uint32_t) got);
         if (!program_stage(offset + done, FLASH_SECTOR_SIZE)) return false;
         if (progress) progress(done + FLASH_SECTOR_SIZE, size);
     }
-    return true;
-}
 
-static void set_name(char *dest, const char *name) {
-    strncpy(dest, name ? name : "", MEDIA_NAME_MAX - 1);
-    dest[MEDIA_NAME_MAX - 1] = '\0';
+    if (crc_out) *crc_out = crc;
+    return true;
 }
 
 // The shared shape of both loads: mark the slot empty *before* the image is
@@ -201,17 +259,153 @@ static void set_name(char *dest, const char *name) {
 // empty rather than a header pointing at half an image.
 static bool load_image(FIL *file, const char *name, uint32_t offset, uint32_t size,
                        uint32_t skip, uint32_t *present, char *stored_name,
-                       media_progress_fn progress) {
+                       size_t stored_len, media_progress_fn progress, uint32_t *crc_out) {
     *present = 0;
-    set_name(stored_name, "");
+    stored_name[0] = '\0';
     bool ok = write_header();
 
-    if (ok) ok = write_image(offset, size, file, skip, progress);
+    if (ok) ok = write_image(offset, size, file, skip, progress, crc_out);
     if (!ok) return false;
 
     *present = 1;
-    set_name(stored_name, name);
+    strncpy(stored_name, name, stored_len - 1);
+    stored_name[stored_len - 1] = '\0';
     return write_header();
+}
+
+// ---------------------------------------------------------------------
+// The .sav sidecar (6502-VCS PLAN.md §4)
+// ---------------------------------------------------------------------
+//
+// Little-endian throughout:
+//
+//   offset  size  field
+//     0      4    magic      'A' 'C' 'S' 'V'
+//     4      1    version    1
+//     5      1    reserved   0
+//     6      2    count      number of sector records
+//     8      4    image_size the SIZE of the .crt this belongs to
+//    12      4    image_crc  CRC-32 of the whole .crt
+//    16    ...    records    count x [ 4-byte sector index ][ 4096 bytes ]
+//
+// image_size and image_crc are what make the sidecar safe. Rebuild the cart and
+// the checksum moves; the loader then says the save belongs to a different
+// build, starts the cart without it, and leaves the file on the card. Nothing
+// here ever deletes a save.
+
+#define SAVE_HEADER_SIZE 16
+
+static const uint8_t *cart_region(void) {
+    return (const uint8_t *) (XIP_BASE + MEDIA_CART_OFFSET);
+}
+
+// Lay a sidecar's sectors into the cartridge region, if there is one that
+// belongs to this cart. Called with the image just written and the cache empty.
+static media_save_state_t apply_save(void) {
+    char path[MEDIA_PATH_MAX + 8];
+    sidecar_path(path, sizeof(path));
+
+    FIL file;
+    if (f_open(&file, path, FA_READ) != FR_OK) return MEDIA_SAVE_NONE;
+
+    uint8_t head[SAVE_HEADER_SIZE];
+    UINT got = 0;
+    if (f_read(&file, head, sizeof(head), &got) != FR_OK || got != sizeof(head)) {
+        f_close(&file);
+        return MEDIA_SAVE_BAD;
+    }
+
+    if (head[0] != 'A' || head[1] != 'C' || head[2] != 'S' || head[3] != 'V' || head[4] != 1) {
+        f_close(&file);
+        return MEDIA_SAVE_BAD;
+    }
+
+    uint16_t count = (uint16_t) (head[6] | ((uint16_t) head[7] << 8));
+    if (read_le32(head + 8) != header.cart_size || read_le32(head + 12) != header.cart_crc) {
+        f_close(&file);
+        return MEDIA_SAVE_MISMATCH;
+    }
+
+    uint32_t sectors = header.cart_size / FLASH_SECTOR_SIZE;
+
+    for (uint16_t i = 0; i < count; i++) {
+        uint8_t index[4];
+        if (f_read(&file, index, sizeof(index), &got) != FR_OK || got != sizeof(index)) {
+            f_close(&file);
+            return MEDIA_SAVE_BAD;
+        }
+        if (f_read(&file, stage, FLASH_SECTOR_SIZE, &got) != FR_OK || got != FLASH_SECTOR_SIZE) {
+            f_close(&file);
+            return MEDIA_SAVE_BAD;
+        }
+
+        uint32_t sector = read_le32(index);
+        if (sector >= sectors) continue;
+        if (!media_cart_write_sector(sector)) {
+            f_close(&file);
+            return MEDIA_SAVE_BAD;
+        }
+        // Counted as differing from the .crt, because it is. A sector that came
+        // back out of a sidecar and was not marked would be dropped from the
+        // next one — a session that read a save and then wrote one other sector
+        // would throw the rest of it away.
+        cart_mark_sector_dirty(sector);
+    }
+
+    f_close(&file);
+    return MEDIA_SAVE_APPLIED;
+}
+
+bool media_save_cart(void) {
+    if (!header.cart_present || !cart_size_banked(header.cart_size)) return true;
+
+    // Everything the cartridge has written is in flash before anything is
+    // counted, so the sidecar is written from one consistent copy.
+    cart_flush();
+
+    // From the header rather than from cart.c, so this does not depend on the
+    // mapper having been pointed at the current image yet.
+    uint32_t sectors = header.cart_size / FLASH_SECTOR_SIZE;
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < sectors; i++) {
+        if (cart_sector_dirty(i)) count++;
+    }
+    if (count == 0) return true; // nothing to say, and no file to leave behind
+
+    char path[MEDIA_PATH_MAX + 8];
+    sidecar_path(path, sizeof(path));
+
+    FIL file;
+    if (f_open(&file, path, FA_CREATE_ALWAYS | FA_WRITE) != FR_OK) return false;
+
+    uint8_t head[SAVE_HEADER_SIZE] = { 'A', 'C', 'S', 'V', 1, 0, 0, 0 };
+    head[6] = (uint8_t) (count & 0xFF);
+    head[7] = (uint8_t) (count >> 8);
+    write_le32(head + 8, header.cart_size);
+    write_le32(head + 12, header.cart_crc);
+
+    UINT wrote = 0;
+    bool ok = f_write(&file, head, sizeof(head), &wrote) == FR_OK && wrote == sizeof(head);
+
+    // Ascending sector index, which the container requires and which a walk of
+    // the dirty record gives for free. The bytes come straight out of the XIP
+    // window — the staging buffer is not needed to read flash, only to write it.
+    for (uint32_t i = 0; ok && i < sectors; i++) {
+        if (!cart_sector_dirty(i)) continue;
+
+        uint8_t index[4];
+        write_le32(index, i);
+        ok = f_write(&file, index, sizeof(index), &wrote) == FR_OK && wrote == sizeof(index);
+        if (!ok) break;
+        ok = f_write(&file, cart_region() + i * FLASH_SECTOR_SIZE, FLASH_SECTOR_SIZE, &wrote) == FR_OK &&
+             wrote == FLASH_SECTOR_SIZE;
+    }
+
+    ok = (f_close(&file) == FR_OK) && ok;
+
+    // The dirty record is *not* cleared. It says which sectors differ from the
+    // .crt, and they still do — the next sidecar has to carry them too.
+    return ok;
 }
 
 void media_init(void) {
@@ -223,7 +417,7 @@ void media_init(void) {
     if (stored->magic == MEDIA_MAGIC) {
         memcpy(&header, stored, sizeof(header));
         header.rom_name[MEDIA_NAME_MAX - 1] = '\0';
-        header.cart_name[MEDIA_NAME_MAX - 1] = '\0';
+        header.cart_path[MEDIA_PATH_MAX - 1] = '\0';
     } else if (stored->magic == MEDIA_MAGIC_V2) {
         // The cartridge has moved out from under this record (see MEDIA_MAGIC),
         // so it goes. The ROM image has not moved, so the override stays.
@@ -265,8 +459,23 @@ const char *media_rom_name(void) {
     return header.rom_present ? header.rom_name : "";
 }
 
+// The last component of the stored path, which is what a status line wants.
 const char *media_cart_name(void) {
-    return header.cart_present ? header.cart_name : "";
+    if (!header.cart_present) return "";
+
+    const char *name = header.cart_path;
+    for (const char *p = header.cart_path; *p; p++) {
+        if (*p == '/') name = p + 1;
+    }
+    return name;
+}
+
+uint32_t media_cart_crc(void) {
+    return header.cart_present ? header.cart_crc : 0;
+}
+
+media_save_state_t media_cart_save_state(void) {
+    return save_state;
 }
 
 bool media_rom_override_stale(void) {
@@ -324,7 +533,8 @@ bool media_load_rom(const char *path, const char *name, media_progress_fn progre
     header.builtin_checksum = rom_checksum(bios_rom);
 
     bool ok = load_image(&file, name, MEDIA_ROM_OFFSET, MEDIA_ROM_SIZE, skip,
-                         &header.rom_present, header.rom_name, progress);
+                         &header.rom_present, header.rom_name, MEDIA_NAME_MAX,
+                         progress, NULL);
     f_close(&file);
 
     // Whatever the built-in BIOS is now, it is the one this choice was made
@@ -369,24 +579,55 @@ media_cart_result_t media_load_cart(const char *path, const char *name,
     uint32_t skip = file_size - written;
 
     header.cart_size = file_size;
+    header.cart_crc = 0;
+    save_state = MEDIA_SAVE_NONE;
 
-    bool ok = load_image(&file, name, MEDIA_CART_OFFSET, written, skip,
-                         &header.cart_present, header.cart_name, progress);
+    // A new image in the slot is the one thing that makes the old cartridge's
+    // record of what it wrote meaningless. Re-loading a .crt is how a save is
+    // thrown away, and this is where that happens.
+    cart_clear_dirty();
+
+    // A flat cart cannot write to itself, so it has no identity to carry and
+    // never has a sidecar; only a banked image's checksum is taken, and for one
+    // of those `written` is the whole file.
+    uint32_t crc = 0;
+    bool ok = load_image(&file, path, MEDIA_CART_OFFSET, written, skip,
+                         &header.cart_present, header.cart_path, MEDIA_PATH_MAX,
+                         progress, cart_size_banked(file_size) ? &crc : NULL);
     f_close(&file);
 
-    return ok ? MEDIA_CART_OK : MEDIA_CART_ERR_WRITE;
+    if (!ok) return MEDIA_CART_ERR_WRITE;
+
+    if (cart_size_banked(file_size)) {
+        header.cart_crc = crc;
+        write_header();
+        // The overlay goes on after the image, so what the machine reads on its
+        // first fetch is already the saved cartridge.
+        save_state = apply_save();
+    }
+
+    return MEDIA_CART_OK;
 }
 
 // Ejecting only clears the flag — the image is left in flash to be erased by
 // whatever is loaded next, since erasing it now would cost the same time for
 // no benefit.
-void media_eject_cart(void) {
-    if (!header.cart_present) return;
+bool media_eject_cart(void) {
+    if (!header.cart_present) return true;
+
+    // Flush the held sector, write the sidecar, *then* clear the header. In
+    // that order, so an eject that fails part way leaves the cartridge in the
+    // slot rather than a save half-written.
     cart_flush();
+    if (!media_save_cart()) return false;
+
     header.cart_present = 0;
     header.cart_size = 0;
-    set_name(header.cart_name, "");
+    header.cart_crc = 0;
+    header.cart_path[0] = '\0';
+    save_state = MEDIA_SAVE_NONE;
     write_header();
+    return true;
 }
 
 void media_restore_builtin_rom(void) {
@@ -394,7 +635,7 @@ void media_restore_builtin_rom(void) {
     cart_flush(); // write_header() below stages through the cartridge's cache
     header.rom_present = 0;
     header.builtin_checksum = 0;
-    set_name(header.rom_name, "");
+    header.rom_name[0] = '\0';
     rom_override_stale = false;
     write_header();
 }

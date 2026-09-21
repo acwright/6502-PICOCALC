@@ -91,16 +91,30 @@ void cart_write(uint16_t addr, uint8_t data);
 // loads or ejects.
 bool cart_flush(void);
 
-// True when the cartridge has written to itself since it was loaded, and that
-// is not yet in the .sav beside the .crt.
+// Which 4 KB sectors of the image differ from the .crt the cartridge was
+// loaded from — the ones a .sav is made of. `sector` counts from the start of
+// the image.
+//
+// "Differs from the .crt", not "not yet saved": writing the sidecar does not
+// clear it, because every sidecar has to carry *every* differing sector. A
+// record that cleared on save would drop the first save's sectors from the
+// second one's file.
+//
+// It lives in RAM, so a power cycle forgets it — the save itself does not go
+// anywhere, since the image is in the Pico's own flash, but the machine can no
+// longer say which sectors to put in a sidecar. Writing one out is therefore
+// something to do in the session that made the save.
 bool cart_dirty(void);
-
-// Which 4 KB sectors it has written, for the sidecar. `sector` counts from the
-// start of the image.
 bool cart_sector_dirty(uint32_t sector);
 uint32_t cart_sector_count(void);
 
-// Clear the dirty record, once it has been written out.
+// Note a sector as differing from the .crt without having programmed it —
+// which is what laying a .sav back over the image does. Marked, because it is
+// a difference, and an unmarked one would be dropped from the next sidecar.
+void cart_mark_sector_dirty(uint32_t sector);
+
+// Forget the record entirely. Only a new image in the slot does this: a reset
+// does not, and neither does writing a sidecar.
 void cart_clear_dirty(void);
 
 #endif

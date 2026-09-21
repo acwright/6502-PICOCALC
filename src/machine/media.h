@@ -50,6 +50,13 @@
 // building FatFs with long names (ffconf.h FF_USE_LFN).
 #define MEDIA_NAME_MAX 32
 
+// Longest path remembered for the cartridge, including the terminator.
+//
+// The path and not just the name, because the save sidecar lives beside the
+// .crt and has to be findable after a power cycle — the cartridge is still in
+// the slot then, and nothing else remembers where it came from.
+#define MEDIA_PATH_MAX 64
+
 // Where machine/settings.c keeps its sector — **frozen**, and written out
 // rather than derived.
 //
@@ -187,8 +194,37 @@ typedef enum {
 media_cart_result_t media_load_cart(const char *path, const char *name,
                                     media_progress_fn progress);
 
+// What was beside the .crt when the cartridge was loaded (6502-VCS PLAN.md §4).
+typedef enum {
+    MEDIA_SAVE_NONE,     // no sidecar, which is the ordinary case
+    MEDIA_SAVE_APPLIED,  // its sectors are in flash, over the image
+    MEDIA_SAVE_MISMATCH, // it belongs to a different build of this cart
+    MEDIA_SAVE_BAD,      // it is not a .sav
+} media_save_state_t;
+
+media_save_state_t media_cart_save_state(void);
+
+// Writes what the cartridge has written to itself to `<stem>.sav` beside its
+// `.crt` on the SD card, in the container of 6502-VCS PLAN.md §4 — so a save
+// can be carried to the desktop emulator, or merged onto a real chip with
+// `6502-flash merge`.
+//
+// **The `.crt` is never written.** The cartridge's own working copy is the
+// image in the Pico's flash, which is the chip in this metaphor; the file on
+// the SD card is the thing you would hand to the Flash Helper. Re-loading the
+// cartridge from the SD card is how a save is thrown away.
+//
+// Returns false only if the file could not be written. A cartridge that has
+// written nothing to itself writes no file and returns true.
+bool media_save_cart(void);
+
 // Empty the cartridge slot / go back to the built-in BIOS. Same reset rule.
-void media_eject_cart(void);
+//
+// Ejecting flushes the held sector, writes the sidecar, and only then clears
+// the header — in that order, so an eject that fails part way leaves the
+// cartridge in the slot rather than a save half-written. Returns false in that
+// case, with the cartridge still loaded.
+bool media_eject_cart(void);
 void media_restore_builtin_rom(void);
 
 #endif

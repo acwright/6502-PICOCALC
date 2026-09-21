@@ -113,12 +113,15 @@ void cart_init(const uint8_t *image, uint32_t size) {
         device_id = 0;
     }
 
-    // A new image in the slot: nothing of the old one is still held, and
-    // nothing of the new one has been written yet. media.c has already flushed
-    // the old cart's sector before overwriting the region.
+    // Nothing of a previous image is still held — media.c flushed the old
+    // cart's sector before overwriting the region.
+    //
+    // The dirty record is deliberately **not** cleared here. This runs on every
+    // machine reset, and a reset does not discard what a cartridge has written
+    // to itself. media.c clears it when it actually puts a new image in the
+    // slot, which is the only thing that makes the record meaningless.
     cache_at = CACHE_NONE;
     cache_dirty = false;
-    memset(dirty_bits, 0, sizeof(dirty_bits));
 
     cart_reset();
 }
@@ -135,24 +138,27 @@ void cart_reset(void) {
 }
 
 bool cart_flush(void) {
-    if (!cache_dirty || cache_at == CACHE_NONE) {
-        cache_dirty = false;
-        return true;
+    bool ok = true;
+
+    if (cache_dirty && cache_at != CACHE_NONE) {
+        ok = media_cart_write_sector(cache_at / CART_SECTOR_SIZE);
     }
 
-    bool ok = media_cart_write_sector(cache_at / CART_SECTOR_SIZE);
     cache_dirty = false;
-    // Whether it landed or not, the buffer is no longer a faithful copy of the
-    // sector under it — saying so is better than serving bytes that may not be
-    // in flash.
+    // Always, dirty or not. This says "the staging buffer is no longer holding
+    // a cartridge sector", and it is what media.c relies on before it stages
+    // something else through the same buffer — a clean sector left claimed here
+    // would have the read path serving whatever media.c put there next.
     cache_at = CACHE_NONE;
     return ok;
 }
 
-static void mark_dirty(uint32_t sector) {
+void cart_mark_sector_dirty(uint32_t sector) {
     if (sector >= sizeof(dirty_bits) * 8) return;
     dirty_bits[sector >> 3] |= (uint8_t) (1u << (sector & 7));
 }
+
+#define mark_dirty cart_mark_sector_dirty
 
 bool cart_sector_dirty(uint32_t sector) {
     if (sector >= sizeof(dirty_bits) * 8) return false;
