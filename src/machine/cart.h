@@ -72,7 +72,35 @@ uint8_t cart_bank(void);
 uint8_t cart_read(uint16_t addr);
 
 // A write through the mapper. $E000-$FFFF latches the bank register and
-// reaches no flash; $C000-$DFFF is a flash write.
+// reaches no flash; $C000-$DFFF is a flash write, which does something only as
+// part of a JEDEC command sequence (§3).
 void cart_write(uint16_t addr, uint8_t data);
+
+// Put the held sector back in the Pico's flash.
+//
+// A byte program on real hardware takes 14 microseconds. Here, writing flash
+// means parking Core 1 and erasing 4 KB — tens of milliseconds, in the middle
+// of a bus cycle, with the renderer stopped. So the emulated chip's dirty
+// sector is held in RAM and the flash is only touched when the cartridge moves
+// to a different sector, when the machine is reset, or when the slot changes.
+// A save routine writes one sector, so in practice flash is written once per
+// save.
+//
+// Anything that needs the staging buffer, or that is about to change what is
+// in the slot, calls this first — machine/media.c does, on every path that
+// loads or ejects.
+bool cart_flush(void);
+
+// True when the cartridge has written to itself since it was loaded, and that
+// is not yet in the .sav beside the .crt.
+bool cart_dirty(void);
+
+// Which 4 KB sectors it has written, for the sidecar. `sector` counts from the
+// start of the image.
+bool cart_sector_dirty(uint32_t sector);
+uint32_t cart_sector_count(void);
+
+// Clear the dirty record, once it has been written out.
+void cart_clear_dirty(void);
 
 #endif

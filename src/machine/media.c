@@ -126,7 +126,20 @@ static uint32_t rom_checksum(const uint8_t *rom) {
 // One sector on its way to flash. flash_range_program() cannot read from
 // flash itself (the SD/FatFs path it came from certainly can't run during the
 // write), so the file is staged here a sector at a time.
+//
+// It is also machine/cart.c's write-back sector cache — see media_stage() in
+// media.h for why there is one of these and not two, and for the rule that
+// keeps the two uses out of each other's way.
 static uint8_t stage[FLASH_SECTOR_SIZE];
+
+// The chip's erase unit and the Pico's are the same 4 KB, which is what lets
+// one emulated sector be one real one.
+_Static_assert(CART_SECTOR_SIZE == FLASH_SECTOR_SIZE,
+               "the cartridge sector cache assumes the two erase units match");
+
+uint8_t *media_stage(void) {
+    return stage;
+}
 
 typedef struct {
     uint32_t offset;
@@ -148,6 +161,11 @@ static void __not_in_flash_func(media_program)(void *param) {
 static bool program_stage(uint32_t offset, uint32_t length) {
     flash_op_t op = { offset, length };
     return flash_safe_execute(media_program, &op, 5000) == PICO_OK;
+}
+
+bool media_cart_write_sector(uint32_t sector) {
+    if (sector >= MEDIA_CART_MAX / FLASH_SECTOR_SIZE) return false;
+    return program_stage(MEDIA_CART_OFFSET + sector * FLASH_SECTOR_SIZE, FLASH_SECTOR_SIZE);
 }
 
 static bool write_header(void) {
@@ -288,6 +306,10 @@ const char *media_builtin_rom_version(void) {
 }
 
 bool media_load_rom(const char *path, const char *name, media_progress_fn progress) {
+    // The staging buffer is the cartridge's sector cache as well (media_stage),
+    // and a ROM load is about to fill it with something else.
+    cart_flush();
+
     FIL file;
     if (f_open(&file, path, FA_READ) != FR_OK) return false;
 
@@ -313,6 +335,10 @@ bool media_load_rom(const char *path, const char *name, media_progress_fn progre
 
 media_cart_result_t media_load_cart(const char *path, const char *name,
                                     media_progress_fn progress) {
+    // Whatever is in the slot keeps what it wrote to itself, and the staging
+    // buffer is where that is being kept.
+    cart_flush();
+
     FIL file;
     if (f_open(&file, path, FA_READ) != FR_OK) return MEDIA_CART_ERR_OPEN;
 
@@ -356,6 +382,7 @@ media_cart_result_t media_load_cart(const char *path, const char *name,
 // no benefit.
 void media_eject_cart(void) {
     if (!header.cart_present) return;
+    cart_flush();
     header.cart_present = 0;
     header.cart_size = 0;
     set_name(header.cart_name, "");
@@ -364,6 +391,7 @@ void media_eject_cart(void) {
 
 void media_restore_builtin_rom(void) {
     if (!header.rom_present) return;
+    cart_flush(); // write_header() below stages through the cartridge's cache
     header.rom_present = 0;
     header.builtin_checksum = 0;
     set_name(header.rom_name, "");

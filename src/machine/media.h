@@ -141,6 +141,23 @@ bool media_rom_override_stale(void);
 // without a serial terminal.
 const char *media_builtin_rom_version(void);
 
+// The one 4 KB flash staging buffer in the firmware, shared on purpose.
+//
+// machine/media.c stages ROM and cartridge images through it on the way into
+// flash; machine/cart.c uses it as the emulated flash chip's write-back sector
+// cache. Both are "one sector, in RAM, on its way to flash", and a Pico 1 has
+// well under a kilobyte of SRAM spare once everything in ram_bank.h's budget
+// is placed — a second one would simply not fit.
+//
+// The rule that makes it safe: anything that stages an image flushes the
+// cartridge's held sector first. Every path in media.c that touches the buffer
+// does, and they are the only callers.
+uint8_t *media_stage(void);
+
+// Erase one 4 KB sector of the cartridge region and program the staging buffer
+// into it. `sector` counts from the start of the image.
+bool media_cart_write_sector(uint32_t sector);
+
 // Called after each flash sector, so the launcher can show progress. `done`
 // and `total` are bytes.
 typedef void (*media_progress_fn)(uint32_t done, uint32_t total);
