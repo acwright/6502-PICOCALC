@@ -34,7 +34,7 @@
 // the UART's own flag, where the reference has no line timing to overrun, and
 // an echo can be lost on the side header if its queue is full.
 
-// R65C51 (6551 ACIA) register bits — see BIOS.inc for the authoritative
+// R6551AP (6551 ACIA) register bits — see BIOS.inc for the authoritative
 // layout this must match (SC_DATA/SC_RESET/SC_STATUS/SC_CMD/SC_CTRL).
 #define SC_CMD_DTR      0x01 // data terminal ready; clear turns the card off
 #define SC_CMD_IRD      0x02 // receiver interrupt disable

@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-// Emulated R65C51 ACIA (6551), IO slot 4 ($9000-$9003), bridged to the Pico's
+// Emulated R6551AP ACIA (6551), IO slot 4 ($9000-$9003), bridged to the Pico's
 // USB CDC stdio. Register layout/behaviour ported from 6502-DEV's SerialCard
 // (see PLAN.md Phase 3), addr is slot-local (0-3):
 //   0 = data (R/W), 1 = status(R)/programmed-reset(W), 2 = command (R/W),
