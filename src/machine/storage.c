@@ -13,8 +13,10 @@
 
 // Status register bits. The emulated card is always RDY and never BSY, as on
 // the Teensy firmware — every command completes inside the store to $8C07.
+// Ready reads $50, RDY and DSC (seek complete), as a real card does.
 #define ST_STATUS_ERR 0x01
 #define ST_STATUS_DRQ 0x08
+#define ST_STATUS_DSC 0x10
 #define ST_STATUS_RDY 0x40
 
 // ATA commands the BIOS and the desktop emulator use.
@@ -55,12 +57,16 @@ static bool available;
 static const uint8_t zero_sector[STORAGE_SECTOR_SIZE] = {0};
 
 // IDENTIFY DRIVE response for the emulated 256 MB card (2048 cylinders x
-// 8 heads x 32 sectors = 524288 sectors). Byte-for-byte the table 6502-DEV's
+// 8 heads x 32 sectors = 524288 sectors). The same table 6502-DEV's
 // StorageCard::generateIdentity() builds; the remaining 388 bytes are zero.
 // The BIOS never issues $EC (StInit uses SET FEATURES), but the desktop
 // emulator answers it, so this card does too.
+//
+// Laid out as a real card sends it: every word low byte first, and in the
+// strings the first character of each pair in the high byte, so the pair "AC"
+// is sent 'C', 'A' and a driver swaps each word back.
 static const uint8_t identity_head[124] = {
-    0x84, 0x8A,             // removable disk, hard-sectored
+    0x8A, 0x84,             // general configuration $848A: a CompactFlash card
     0x00, 0x08,             // 2048 cylinders
     0x00, 0x00,             // reserved
     0x08, 0x00,             // 8 heads
@@ -69,13 +75,13 @@ static const uint8_t identity_head[124] = {
     0x20, 0x00,             // 32 sectors per track
     0x08, 0x00, 0x00, 0x00, // 524288 sectors per card
     0x00, 0x00,             // reserved
-    'A','C','W','D','6','5','0','2','E','M','U','C','F','1','0','1','0','1','0','1', // serial #
+    'C','A','D','W','5','6','2','0','M','E','C','U','1','F','1','0','1','0','1','0', // serial # ACWD6502EMUCF1010101
     0x01, 0x00,             // buffer type
     0x04, 0x00,             // buffer size in 512-byte increments
     0x04, 0x00,             // ECC bytes passed
-    '1','.','0',' ',' ',' ',' ',' ', // firmware revision
-    'A','C','W','D','6','5','0','2','E','M','U','C','F', // model #, space padded
-    ' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',
+    '.','1',' ','0',' ',' ',' ',' ', // firmware revision "1.0"
+    'C','A','D','W','5','6','2','0','M','E','C','U',' ','F', // model # ACWD6502EMUCF, space padded
+    ' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',
     ' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',
     0x01, 0x00,             // max 1 sector on read/write multiple
     0x00, 0x00,             // double word transfer not supported
@@ -213,7 +219,7 @@ void storage_reset(void) {
     lba1 = 0x00;
     lba2 = 0x00;
     lba3 = 0xE0; // LBA mode, master drive
-    status = ST_STATUS_RDY;
+    status = ST_STATUS_RDY | ST_STATUS_DSC;
     command = 0x00;
 
     identifying = false;
@@ -231,35 +237,57 @@ static bool sector_valid(void) {
     return sector_index() < STORAGE_SECTOR_COUNT;
 }
 
+// Ends any transfer with an error, as a real card does: DRQ clears and the
+// data register stops moving bytes.
+static void fail(uint8_t err) {
+    status |= ST_STATUS_ERR;
+    status &= (uint8_t) ~ST_STATUS_DRQ;
+    error = err;
+    transferring = false;
+    identifying = false;
+    buffer_index = 0;
+}
+
+// The sectors this command moves: its count, with 0 meaning 256 (ATA).
+static uint32_t transfer_sectors(void) {
+    return command_data_size / STORAGE_SECTOR_SIZE;
+}
+
+static bool reading(void) { return command == ST_CMD_READ || command == ST_CMD_READ_ALT; }
+static bool writing(void) { return command == ST_CMD_WRITE || command == ST_CMD_WRITE_ALT; }
+
 static void execute_command(void) {
+    if (!available) {
+        fail(ST_ERR_AMNF);
+        return;
+    }
+    if (transferring || identifying) {
+        // A command in the middle of another one's transfer ends that transfer
+        // and is refused, as a real card does.
+        fail(ST_ERR_ABRT);
+        return;
+    }
+
     // New command, so clear the previous one's error and data-request flags.
     status &= (uint8_t) ~ST_STATUS_ERR;
     status &= (uint8_t) ~ST_STATUS_DRQ;
     error = 0x00;
-    command_data_size = (uint32_t) STORAGE_SECTOR_SIZE * sector_count;
+    command_data_size = (uint32_t) STORAGE_SECTOR_SIZE * (sector_count ? sector_count : 256);
     buffer_index = 0;
     sector_offset = 0;
 
-    if (!available) {
-        status |= ST_STATUS_ERR;
-        error |= ST_ERR_AMNF;
-        return;
-    }
-    if (transferring || identifying) {
-        // Already mid-transfer: abort rather than interleave commands.
-        status |= ST_STATUS_ERR;
-        error |= ST_ERR_ABRT;
-        return;
-    }
-
     switch (command) {
-        case ST_CMD_ERASE:
-            if (!sector_valid()) {
-                status |= ST_STATUS_ERR;
-                error |= ST_ERR_ABRT | ST_ERR_IDNF;
-            } else if (!image_write(sector_index(), zero_sector)) {
-                status |= ST_STATUS_ERR;
-                error |= ST_ERR_UNC;
+        case ST_CMD_ERASE: // `count` sectors from the LBA
+            for (uint32_t i = 0; i < transfer_sectors(); i++) {
+                uint32_t sector = sector_index() + i;
+                if (sector >= STORAGE_SECTOR_COUNT) {
+                    fail(ST_ERR_ABRT | ST_ERR_IDNF);
+                    break;
+                }
+                if (!image_write(sector, zero_sector)) {
+                    fail(ST_ERR_UNC);
+                    break;
+                }
             }
             break;
 
@@ -275,13 +303,11 @@ static void execute_command(void) {
         case ST_CMD_READ:
         case ST_CMD_READ_ALT:
             if (!sector_valid()) {
-                status |= ST_STATUS_ERR;
-                error |= ST_ERR_ABRT | ST_ERR_IDNF;
+                fail(ST_ERR_ABRT | ST_ERR_IDNF);
             } else if (!image_read(sector_index(), buffer)) {
-                status |= ST_STATUS_ERR;
-                error |= ST_ERR_UNC;
+                fail(ST_ERR_UNC);
             } else {
-                // First sector is in the buffer; the rest (if sector_count > 1)
+                // First sector is in the buffer; the rest (if more than one)
                 // are fetched as the machine drains it (see read_buffer()).
                 status |= ST_STATUS_DRQ;
                 transferring = true;
@@ -291,8 +317,7 @@ static void execute_command(void) {
         case ST_CMD_WRITE:
         case ST_CMD_WRITE_ALT:
             if (!sector_valid()) {
-                status |= ST_STATUS_ERR;
-                error |= ST_ERR_ABRT | ST_ERR_IDNF;
+                fail(ST_ERR_ABRT | ST_ERR_IDNF);
             } else {
                 status |= ST_STATUS_DRQ;
                 transferring = true;
@@ -306,8 +331,7 @@ static void execute_command(void) {
             break;
 
         default:
-            status |= ST_STATUS_ERR;
-            error |= ST_ERR_ABRT;
+            fail(ST_ERR_ABRT);
             break;
     }
 }
@@ -327,7 +351,7 @@ static uint8_t read_buffer(void) {
         return data;
     }
 
-    if (transferring) {
+    if (transferring && reading()) {
         uint8_t data = buffer[buffer_index];
 
         if (buffer_index < STORAGE_SECTOR_SIZE - 1) {
@@ -336,13 +360,10 @@ static uint8_t read_buffer(void) {
             buffer_index = 0;
             sector_offset++;
 
-            if (sector_offset < sector_count) { // multi-sector read: load the next one
-                if (!image_read(sector_index() + sector_offset, buffer)) {
-                    status |= ST_STATUS_ERR;
-                    error |= ST_ERR_UNC;
-                    transferring = false;
-                    status &= (uint8_t) ~ST_STATUS_DRQ;
-                }
+            if (sector_offset < transfer_sectors()) { // multi-sector read: load the next one
+                uint32_t sector = sector_index() + sector_offset;
+                if (sector >= STORAGE_SECTOR_COUNT) fail(ST_ERR_ABRT | ST_ERR_IDNF);
+                else if (!image_read(sector, buffer)) fail(ST_ERR_UNC);
             } else {
                 transferring = false;
                 status &= (uint8_t) ~ST_STATUS_DRQ;
@@ -356,6 +377,9 @@ static uint8_t read_buffer(void) {
 }
 
 static void write_buffer(uint8_t value) {
+    // Only a write command's transfer takes data: outside one (DRQ clear) a
+    // real card ignores the data register.
+    if (!transferring || !writing()) return;
     buffer[buffer_index] = value;
 
     if (buffer_index < STORAGE_SECTOR_SIZE - 1) {
@@ -365,14 +389,16 @@ static void write_buffer(uint8_t value) {
 
     buffer_index = 0;
     if (!image_write(sector_index() + sector_offset, buffer)) {
-        status |= ST_STATUS_ERR;
-        error |= ST_ERR_UNC;
+        fail(ST_ERR_UNC);
+        return;
     }
 
     sector_offset++;
-    if (sector_offset >= sector_count) {
+    if (sector_offset >= transfer_sectors()) {
         transferring = false;
         status &= (uint8_t) ~ST_STATUS_DRQ;
+    } else if (sector_index() + sector_offset >= STORAGE_SECTOR_COUNT) {
+        fail(ST_ERR_ABRT | ST_ERR_IDNF); // the next sector is past the end of the card
     }
 }
 

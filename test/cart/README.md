@@ -14,8 +14,9 @@ So this runs on a desktop, where a Pico is not:
 `shim/` is `__not_in_flash_func` and the three numbers `machine/media.h` wants from the SDK.
 The real `media.h` compiles, layout arithmetic and static assertions included; `test_cart.c`
 supplies the two functions `cart.c` calls into flash with, over a plain array. Nothing else
-in the firmware is shimmed and nothing else should be — this exists for the one module that
-has an external contract.
+in the firmware is shimmed and nothing else should be: this exists for the modules that have
+an external contract. The other one is the CompactFlash card, in
+[`test/storage/`](../storage/README.md).
 
 ## The fixture
 

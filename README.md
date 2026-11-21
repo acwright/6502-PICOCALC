@@ -249,6 +249,11 @@ higher disks are used, so all 256 are addressable without pre-filling 256 MB
 over SPI. Images can also be built on a desktop with
 [`cffs`](https://github.com/acwright/cffs).
 
+The card answers as a real CompactFlash card does, as the desktop emulator's
+does: ready reads `$50`, IDENTIFY is laid out as a card sends it, a count of 0
+moves 256 sectors, and a command written during a transfer ends it. The tests in
+[`test/storage/`](test/storage/README.md) check it on a desktop.
+
 Files list under the names they were written with: FatFs is built with
 long-name support, so `Space Invaders.bas` appears as itself rather than as
 `SPACEI~1.BAS`. Names longer than 31 characters are truncated on screen, which
@@ -350,6 +355,8 @@ src/
   fatfs/          FatFs, for the SD card
   launcher/       The F1 launcher — file browser, slots, settings
   main.c          Boot, the Core 0 run loop, and the USB CDC console
+test/cart/        The cartridge mapper's tests, on a desktop
+test/storage/     The CompactFlash card's tests, on a desktop
 build.sh          Configures and builds the .uf2 for one or both boards
 embed-rom.sh      Regenerates src/rom/bios_rom.c from a 6502-BIOS tag
 ```
