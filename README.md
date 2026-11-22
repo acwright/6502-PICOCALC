@@ -37,7 +37,7 @@ synthesises the SID.
 | **RTC / NVRAM** | DS1511Y+ — clock plus 256 B of NVRAM, kept in flash, with burst mode for the BIOS's save slots |
 | **GPIO** | 6522 VIA — keyboard on port B, fed from the PicoCalc's I2C keyboard, plus a joystick on each port |
 
-Four places knowingly differ from the reference: the VDP status register's
+Five places knowingly differ from the reference: the VDP status register's
 fifth-sprite and collision bits always read 0 (sprites are rasterised on the
 other core); the emulated CPU is not paced to a fixed clock rate — it runs as
 fast as the board manages; a byte that arrives while the ACIA's receiver is
@@ -45,8 +45,26 @@ off waits on the link instead of being lost on the wire, which only matters for
 the few hundred cycles between reset and the BIOS's `InitSC`; and a flash
 cartridge's program and erase complete instantly, which is a consequence of the
 second one and is worth reading [Flash carts](#flash-carts) about if you are
-writing a cartridge that programs itself. Nothing in the BIOS or BASIC depends
-on any of them.
+writing a cartridge that programs itself; and the keyboard is the simpler one
+the reference had before the machine's keyboard learned to share its port with
+the joystick. Nothing in the BIOS or BASIC depends on any of them.
+
+The keyboard's differences, for a program that reads keys and the stick:
+
+- **One key, held until it is read.** There is no queue: a key typed before
+  the last was read replaces it, and a key stays on the port until the 6502
+  reads it. On the machine sixteen keys wait their turn, one goes out at a
+  time, and each stays on the port for 20 ms, so a program that polls the VIA
+  too slowly misses keys there.
+- **A held stick never holds a key back.** On the machine the stick shares the
+  keyboard's lines, and a key whose code a held stick would change waits until
+  the stick is released. Here the stick is the PicoCalc's own keys.
+- **The port is let go at once, and a key survives a joystick read.** On the
+  machine `KBDisable` can take up to 100 µs to get the port, and reading the
+  stick ends the key on the port.
+
+The reference models all of these as the machine behaves, and is where a
+program that depends on them is meant to be caught.
 
 The ACIA sits on the standard Serial Card with its `CTS EN` jumper at ground,
 as every board is built: CTS, DCD and DSR are all tied low. Here that is the
