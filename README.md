@@ -84,9 +84,10 @@ embedded BIOS v1.6 below is the reissue that copes with it. Receiver echo mode
 (command bit 4) sends each byte back out of both links, as it does for any byte
 the machine sends. Before v1.0.5 the echo went to the USB console only.
 
-The embedded ROM is BIOS **v1.6**, the last 1.x release. The PicoCalc is a
-TMS9918A machine and stays on the 1.x line, so this is the BIOS it keeps. 1.6
-adds the Kernal's NVRAM save slots: 16 slots of 14 bytes, each with an owner ID
+The embedded ROM is BIOS **v1.6**. The PicoCalc is a TMS9918A machine and stays
+on the 1.x line; the later 1.x releases, 1.7 and 1.8, aren't embedded yet, and
+either can be loaded from the SD card instead (see [The ROM socket](#the-rom-socket)).
+1.6 adds the Kernal's NVRAM save slots: 16 slots of 14 bytes, each with an owner ID
 and a checksum. The NVRAM here is flash-backed, so saves survive a power cycle
 like the battery-backed part. A change is committed about two seconds after
 the last write, so a save needs that long before power is cut.
